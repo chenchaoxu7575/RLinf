@@ -19,6 +19,7 @@ import torch
 from omegaconf.omegaconf import DictConfig
 
 from rlinf.scheduler import Channel
+from rlinf.utils.nsight_profiler import NsightProfiler
 from rlinf.workers.rollout.hf.huggingface_worker import MultiStepRolloutWorker
 
 
@@ -45,6 +46,7 @@ class AsyncMultiStepRolloutWorker(MultiStepRolloutWorker):
         self._weight_sync_coalesced_total = 0
         self._weight_sync_request_total = 0
 
+    @NsightProfiler.annotate("rollout/generate")
     async def generate(
         self,
         input_channel: Channel,
@@ -131,6 +133,7 @@ class AsyncMultiStepRolloutWorker(MultiStepRolloutWorker):
         gc.collect()
         torch.cuda.empty_cache()
 
+    @NsightProfiler.annotate("rollout/poll_weight_sync")
     async def _poll_background_weight_sync(self):
         self._start_background_weight_sync_if_needed()
         if self._weight_sync_work is None:
@@ -146,6 +149,7 @@ class AsyncMultiStepRolloutWorker(MultiStepRolloutWorker):
 
         self._start_background_weight_sync_if_needed()
 
+    @NsightProfiler.annotate("rollout/request_weight_sync")
     async def request_actor_sync_model(self):
         self._weight_sync_request_total += 1
         if self._weight_sync_requested or self._weight_sync_work is not None:

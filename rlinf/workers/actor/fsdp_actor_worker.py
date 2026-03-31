@@ -66,6 +66,7 @@ from rlinf.utils.metric_utils import (
     compute_rollout_metrics,
     compute_split_num,
 )
+from rlinf.utils.nsight_profiler import NsightProfiler
 from rlinf.utils.nested_dict_process import (
     put_tensor_device,
     split_dict_to_chunk,
@@ -1014,6 +1015,11 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
 
         self.enable_sft_co_train = cfg.actor.get("enable_sft_co_train", False)
         self.version = 0
+        self.nsight_profiler = NsightProfiler.from_config(
+            self.cfg.get("nsight_profiler", None),
+            role="actor",
+            rank=self._rank,
+        )
         if self.enable_sft_co_train:
             self._build_sft_data_loader()
 
@@ -1058,6 +1064,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
 
         return model
 
+    @NsightProfiler.annotate("actor/sync_weights_to_rollout")
     async def sync_model_to_rollout(self) -> None:
         """
         Sync the model's full state dict to the rollout worker.
@@ -1085,6 +1092,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         if self.enable_offload and not self.is_weight_offloaded:
             self.offload_param_and_grad()
 
+    @NsightProfiler.annotate("actor/recv_traj")
     async def recv_rollout_trajectories(self, input_channel: Channel) -> None:
         """
         Receive rollout trajectories from rollout workers.
@@ -1184,6 +1192,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
 
         return rollout_batch
 
+    @NsightProfiler.annotate("actor/compute_adv")
     def compute_advantages_and_returns(self) -> dict[str, torch.Tensor]:
         """
         Compute the advantages and returns.
@@ -1300,6 +1309,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 f"sft_loss_weight={self.sft_loss_weight:.6f}"
             )
 
+    @NsightProfiler.annotate("actor/run_training")
     @Worker.timer("run_training")
     def run_training(self) -> None:
         """
