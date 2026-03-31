@@ -40,6 +40,7 @@ from rlinf.utils.nested_dict_process import (
     split_dict,
     update_nested_cfg,
 )
+from rlinf.utils.nsight_profiler import NsightProfiler
 from rlinf.utils.placement import HybridComponentPlacement
 from rlinf.workers.env.history_manager import HistoryManager
 
@@ -117,6 +118,11 @@ class EnvWorker(Worker):
             // self.cfg.actor.model.num_action_chunks
         )
         self.actor_split_num = self.get_actor_split_num()
+        self.nsight_profiler = NsightProfiler.from_config(
+            self.cfg.get("nsight_profiler", None),
+            role="env",
+            rank=self._rank,
+        )
 
         if not self.only_eval:
             self.train_prev_done: list[torch.Tensor] = [
@@ -390,6 +396,7 @@ class EnvWorker(Worker):
             if self.enable_offload and hasattr(self.env_list[i], "offload"):
                 self.env_list[i].offload()
 
+    @NsightProfiler.annotate("env/step")
     @Worker.timer("env_interact_step")
     def env_interact_step(
         self, chunk_actions: torch.Tensor, stage_id: int
@@ -586,6 +593,7 @@ class EnvWorker(Worker):
 
         return merged_final_obs
 
+    @NsightProfiler.annotate("env/recv_actions")
     def recv_chunk_actions(self, input_channel: Channel, mode="train") -> np.ndarray:
         """Receive and merge chunked actions for the current env worker.
 
@@ -727,6 +735,7 @@ class EnvWorker(Worker):
                 if not self.cfg.env.eval.auto_reset:
                     self.eval_env_list[i].update_reset_state_ids()
 
+    @NsightProfiler.annotate("env/send_obs")
     def send_env_batch(
         self,
         rollout_channel: Channel,
@@ -1184,6 +1193,7 @@ class EnvWorker(Worker):
 
         return env_metrics
 
+    @NsightProfiler.annotate("env/interact")
     @Worker.timer("interact")
     async def interact(
         self,
