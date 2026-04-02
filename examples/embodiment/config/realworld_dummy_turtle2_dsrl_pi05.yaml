@@ -106,6 +106,8 @@ env:
       use_arm_ids: [1]
       use_camera_ids: [0, 1, 2]
       target_ee_pose: [[0, 0, 0, 0, 0, 0], [0.0, 0.0, 0.15, 0.0, 1, 0.0]]
+      step_frequency: 30.0
+      image_size: 224
 
   eval:
     total_num_envs: 1
@@ -114,6 +116,8 @@ env:
       use_arm_ids: [1]
       use_camera_ids: [0, 1, 2]
       target_ee_pose: [[0, 0, 0, 0, 0, 0], [0.0, 0.0, 0.15, 0.0, 1, 0.0]]
+      step_frequency: 30.0
+      image_size: 224
 
 rollout:
   group_name: "RolloutGroup"

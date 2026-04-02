@@ -41,6 +41,7 @@ class Turtle2RobotConfig:
     use_dense_reward: bool = False
     step_frequency: float = 10.0  # Max number of steps per second
     smooth_frequency: int = 50  # Frequency for smooth controller
+    image_size: int = 224  # Camera observation resolution (square)
 
     # Positions are stored in eular angles (xyz for position, rzryrx for orientation)
     # It will be converted to quaternions internally
@@ -194,7 +195,7 @@ class Turtle2Env(gym.Env):
                 "frames": gym.spaces.Dict(
                     {
                         f"wrist_{k + 1}": gym.spaces.Box(
-                            0, 255, shape=(128, 128, 3), dtype=np.uint8
+                            0, 255, shape=(self.config.image_size, self.config.image_size, 3), dtype=np.uint8
                         )
                         for k in range(len(self.config.use_camera_ids))
                     }
@@ -535,7 +536,7 @@ class Turtle2Env(gym.Env):
             frames = self._controller.get_cams(self.config.use_camera_ids).wait()[0]
             assert len(frames) == len(self.config.use_camera_ids), "get frames failed."
             for i in range(len(frames)):
-                frames[i] = self._crop_frame(frames[i], (128, 128))
+                frames[i] = self._crop_frame(frames[i], (self.config.image_size, self.config.image_size))
             tcp_pose = []
             if 0 in self.config.use_arm_ids:
                 tmp = np.zeros(7)
