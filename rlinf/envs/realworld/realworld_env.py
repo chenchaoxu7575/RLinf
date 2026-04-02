@@ -258,14 +258,15 @@ class RealWorldEnv(gym.Env):
             infos["episode"]["success_at_end"] = to_tensor(terminations)
             terminations[:] = False
 
-        intervene_action = np.zeros_like(actions)
-        if "intervene_action" in infos:
-            for env_id in range(self.num_envs):
-                env_intervene_action = infos["intervene_action"][env_id]
-                if env_intervene_action is not None:
-                    intervene_action[env_id] = env_intervene_action.copy()
-        infos["intervene_action"] = to_tensor(intervene_action)
-        infos["intervene_flag"] = to_tensor(intervene_flag)
+        if intervene_flag.any():
+            intervene_action = np.zeros_like(actions)
+            if "intervene_action" in infos:
+                for env_id in range(self.num_envs):
+                    env_intervene_action = infos["intervene_action"][env_id]
+                    if env_intervene_action is not None:
+                        intervene_action[env_id] = env_intervene_action.copy()
+            infos["intervene_action"] = to_tensor(intervene_action)
+            infos["intervene_flag"] = to_tensor(intervene_flag)
 
         dones = terminations | truncations
         _auto_reset = auto_reset and self.auto_reset
