@@ -340,6 +340,7 @@ class MultiStepRolloutWorker(Worker):
                 final_values = torch.zeros_like(actions[:, :1], dtype=torch.float32)
         return final_values[:, :1].cpu().contiguous()
 
+    @NsightProfiler.annotate("rollout/sync_model_from_actor")
     async def sync_model_from_actor(self):
         """Sync model parameters from the actor worker."""
         param_state_dict = await self.recv(
@@ -629,7 +630,7 @@ class MultiStepRolloutWorker(Worker):
             for idx in range(len(sizes))
         ]
 
-    @NsightProfiler.annotate("rollout/send_traj")
+    @NsightProfiler.annotate("rollout/send_rollout_result")
     def send_rollout_result(
         self,
         output_channel: Channel,
