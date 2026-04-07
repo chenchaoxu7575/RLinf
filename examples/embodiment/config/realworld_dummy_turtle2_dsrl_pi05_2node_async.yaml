@@ -12,19 +12,57 @@ hydra:
   searchpath:
     - file://${oc.env:EMBODIED_PATH}/config/
 
+# ============================================================
+# 2-Node Async DSRL Pi0.5 Setup:
+#   Node 0 (H20, h20-8): actor (training)        — GPU0 NUMA0
+#   Node 1 (L20, l20-8): rollout (inference) + env (dummy) — GPU0 NUMA0
+#
+# Network: 400Gbps BF3 ConnectX-7, PIX affinity to GPU0
+#   H20 GPU0 <-PIX-> mlx5_0 (enp26s0f0np0,  192.168.251.176)
+#   L20 GPU0 <-PIX-> mlx5_0 (ens1006f0np0,  192.168.251.56)
+# ============================================================
 cluster:
-  num_nodes: 1
+  num_nodes: 2
+  distributed_channel: True
   component_placement:
-    actor: 0-0
-    env: 1-1
-    rollout: 2-2
+    actor:
+      node_group: h20
+      placement: 0-0
+    rollout:
+      node_group: l20
+      placement: 0-0
+    env:
+      node_group: l20_node
+      placement: 0
+  node_groups:
+    - label: h20
+      node_ranks: 0-0
+      env_configs:
+        - node_ranks: 0-0
+          python_interpreter_path: /opt/venv/openpi/bin/python
+          env_vars:
+            - GLOO_SOCKET_IFNAME: "enp26s0f0np0"
+            - NCCL_SOCKET_IFNAME: "enp26s0f0np0"
+            - NCCL_IB_HCA: "mlx5_0"
+    - label: l20
+      node_ranks: 1-1
+      env_configs:
+        - node_ranks: 1-1
+          python_interpreter_path: /opt/venv/openpi/bin/python
+          env_vars:
+            - GLOO_SOCKET_IFNAME: "ens1006f0np0"
+            - NCCL_SOCKET_IFNAME: "ens1006f0np0"
+            - NCCL_IB_HCA: "mlx5_0"
+    - label: l20_node
+      node_ranks: 1-1
+      ignore_hardware: true
 
 runner:
   task_type: embodied
   logger:
     log_path: "../results"
     project_name: rlinf
-    experiment_name: "turtle2_dsrl_pi05"
+    experiment_name: "turtle2_dsrl_pi05_2node_async"
     logger_backends: ["tensorboard"]
 
   max_epochs: 10
@@ -106,8 +144,6 @@ env:
       use_arm_ids: [1]
       use_camera_ids: [0, 1, 2]
       target_ee_pose: [[0, 0, 0, 0, 0, 0], [0.0, 0.0, 0.15, 0.0, 1, 0.0]]
-      step_frequency: 30.0
-      image_size: 224
 
   eval:
     total_num_envs: 1
@@ -116,8 +152,6 @@ env:
       use_arm_ids: [1]
       use_camera_ids: [0, 1, 2]
       target_ee_pose: [[0, 0, 0, 0, 0, 0], [0.0, 0.0, 0.15, 0.0, 1, 0.0]]
-      step_frequency: 30.0
-      image_size: 224
 
 rollout:
   group_name: "RolloutGroup"
@@ -200,7 +234,7 @@ actor:
       buffer_dtype: ${actor.model.precision}
 
 nsight_profiler:
-  steps: [5,6,7]
+  steps: [6, 7, 8]
   discrete: false
 
   nsight_options:

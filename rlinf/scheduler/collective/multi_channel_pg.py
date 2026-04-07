@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+import os
 from datetime import timedelta
 from typing import Optional
 
@@ -71,15 +72,18 @@ class MultiChannelProcessGroup:
         # Check if all workers have the same accelerator type
         accel_type = group_info.workers[0].accelerator_type
         accel_model = group_info.workers[0].accelerator_model
-        self._no_accel_ccl = (
-            # Hetero accelerator models in the same group, disable CCL
-            # NCCL for example does not support mixed GPU models
-            any(
-                worker.accelerator_model != accel_model for worker in group_info.workers
+        force_ccl = os.environ.get("RLINF_FORCE_ACCEL_CCL", "0") == "1"
+        hetero_models = any(
+            worker.accelerator_model != accel_model for worker in group_info.workers
+        )
+        if hetero_models and force_ccl:
+            self._logger.warning(
+                "Heterogeneous accelerator models detected but RLINF_FORCE_ACCEL_CCL=1, "
+                "forcing accelerator CCL (e.g. NCCL). This may not be officially supported."
             )
-            # CPU only, disable CCL
+        self._no_accel_ccl = (
+            (hetero_models and not force_ccl)
             or accel_type == AcceleratorType.NO_ACCEL
-            # Unsupported accelerator CCL type, disable CCL
             or accel_type not in AcceleratorUtil.CCL_SUPPORT_LIST
         )
         self._accel_ccl_backend = (
@@ -159,12 +163,12 @@ class MultiChannelProcessGroup:
                 group_name=group_name + f"{self._accel_ccl_backend}_send_0",
                 timeout=timeout,
                 pg_options=pg_options,
-                # device_id=torch.device(f"cuda:{torch.cuda.current_device()}"),
-                # Setting device_id is crucial triggers eager creation of NCCL communicators
-                # https://docs.pytorch.org/docs/stable/distributed.html#torch.distributed.init_process_group
-                # If not, communicators will only be created upon the first collective operation
-                # If the first pair of communications are from different process groups (e.g., two async recvs from a group), the NCCL group creation will hang by then
-                # However, eager creation of NCCL communicators leads to severe GPU memory consumption. So we disable it by default.
+                device_id=torch.device(f"cuda:{torch.cuda.current_device()}")
+                if os.environ.get("RLINF_NCCL_EAGER_INIT", "0") == "1"
+                else None,
+                # Setting device_id triggers eager creation of NCCL communicators.
+                # Without it, lazy init can hang with heterogeneous GPUs or async recv patterns.
+                # Enable via RLINF_NCCL_EAGER_INIT=1 (costs extra GPU memory per communicator).
             )
 
             for i in range(self._num_channels):

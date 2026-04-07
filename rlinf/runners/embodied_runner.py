@@ -78,9 +78,10 @@ class EmbodiedRunner:
         channel_nsight_options = self._channel_nsight_options
 
         # Data channels
-        self.env_channel = Channel.create("Env", nsight_options=channel_nsight_options)
-        self.rollout_channel = Channel.create("Rollout", nsight_options=channel_nsight_options)
-        self.actor_channel = Channel.create("Actor", nsight_options=channel_nsight_options)
+        distributed = cfg.cluster.get("distributed_channel", False)
+        self.env_channel = Channel.create("Env", distributed=distributed, nsight_options=channel_nsight_options)
+        self.rollout_channel = Channel.create("Rollout", distributed=distributed, nsight_options=channel_nsight_options)
+        self.actor_channel = Channel.create("Actor", distributed=distributed, nsight_options=channel_nsight_options)
 
         # this timer checks if we should stop training
         self.run_timer = run_timer
