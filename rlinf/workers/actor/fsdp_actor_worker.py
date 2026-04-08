@@ -275,6 +275,40 @@ class FSDPActor(FSDPModelManager, Worker):
 
         torch.distributed.barrier()
 
+    def divide_model_to_bucket(self, state_dict, has_visual):
+        bucket_capacity = self.bucket_capacity
+        model_bucket_list = []
+        current_capacity = 0
+        model_bucket = {}
+        for key, val in state_dict.items():
+            name = key
+            if "_extra_state" in name:
+                continue
+            if has_visual:
+                if name.startswith("model.language_model."):
+                    name = "model." + name[21:]
+                # NOTE:
+                # if transformers version is 4.56.1 or older(not tested),
+                # the following line should be uncommented
+
+                # elif name.startswith("model."):
+                #     name = name[6:]
+
+            model_bucket[name] = val
+            current_capacity += (
+                val.numel() * val.element_size() * torch.distributed.get_world_size()
+            )
+
+            if current_capacity >= bucket_capacity:
+                model_bucket_list.append(model_bucket)
+                current_capacity = 0
+                model_bucket = {}
+
+        if len(model_bucket) > 0:
+            model_bucket_list.append(model_bucket)
+        return model_bucket_list
+
+    @NsightProfiler.annotate("actor/sync_model_to_rollout")
     def sync_model_to_rollout(self):
         """
         Sync the model's full state dict to the rollout worker.
@@ -1030,7 +1064,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
     def get_rollout_state_dict(self) -> dict:
         return self.get_model_state_dict(cpu_offload=False, full_state_dict=False)
 
-    @NsightProfiler.annotate("actor/sync_weights_to_rollout")
+    @NsightProfiler.annotate("actor/sync_model_to_rollout")
     async def sync_model_to_rollout(self) -> None:
         if self.enable_offload:
             if not self.is_optimizer_offloaded:
