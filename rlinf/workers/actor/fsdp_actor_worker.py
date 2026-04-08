@@ -313,6 +313,7 @@ class FSDPActor(FSDPModelManager, Worker):
             model_bucket_list.append(model_bucket)
         return model_bucket_list
 
+    @NsightProfiler.annotate("actor/sync_model_to_rollout")
     def sync_model_to_rollout(self) -> None:
         """
         Sync the model's full state dict to the rollout worker.
@@ -1064,7 +1065,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
 
         return model
 
-    @NsightProfiler.annotate("actor/sync_weights_to_rollout")
+    @NsightProfiler.annotate("actor/sync_model_to_rollout")
     async def sync_model_to_rollout(self) -> None:
         """
         Sync the model's full state dict to the rollout worker.
