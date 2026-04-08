@@ -140,6 +140,12 @@ class EmbodiedRunner:
         self.rollout.init_worker().wait()
         self.env.init_worker().wait()
 
+        # Warmup cross-node NCCL process groups by doing one weight sync.
+        if self.cfg.cluster.get("num_nodes", 1) > 1:
+            self.logger.info("Warming up cross-node communication...")
+            self.update_rollout_weights()
+            self.logger.info("Cross-node communication warmup complete.")
+
         resume_dir = self.cfg.runner.get("resume_dir", None)
         if resume_dir is None:
             return

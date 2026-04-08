@@ -23,7 +23,7 @@ hydra:
 # ============================================================
 cluster:
   num_nodes: 2
-  distributed_channel: True
+  distributed_channel: true
   component_placement:
     actor:
       node_group: h20
