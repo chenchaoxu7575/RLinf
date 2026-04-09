@@ -41,6 +41,8 @@ cluster:
         - node_ranks: 0-0
           python_interpreter_path: /opt/venv/openpi/bin/python
           env_vars:
+            - RLINF_FORCE_ACCEL_CCL: "1"
+            - NCCL_CROSS_NIC: "1"
             - GLOO_SOCKET_IFNAME: "enp26s0f0np0"
             - NCCL_SOCKET_IFNAME: "enp26s0f0np0"
             - NCCL_IB_HCA: "mlx5_0"
@@ -50,6 +52,8 @@ cluster:
         - node_ranks: 1-1
           python_interpreter_path: /opt/venv/openpi/bin/python
           env_vars:
+            - RLINF_FORCE_ACCEL_CCL: "1"
+            - NCCL_CROSS_NIC: "1"
             - GLOO_SOCKET_IFNAME: "ens1006f0np0"
             - NCCL_SOCKET_IFNAME: "ens1006f0np0"
             - NCCL_IB_HCA: "mlx5_0"

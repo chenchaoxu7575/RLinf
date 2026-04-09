@@ -76,13 +76,20 @@ class MultiChannelProcessGroup:
         hetero_models = any(
             worker.accelerator_model != accel_model for worker in group_info.workers
         )
-        if hetero_models and force_ccl:
+        all_have_gpu = all(
+            worker.accelerator_type != AcceleratorType.NO_ACCEL
+            and worker.accelerator_model != ""
+            and "Channel" not in worker.address.get_name()
+            and "Metric" not in worker.address.get_name()
+            for worker in group_info.workers
+        )
+        if hetero_models and force_ccl and all_have_gpu:
             self._logger.warning(
-                "Heterogeneous accelerator models detected but RLINF_FORCE_ACCEL_CCL=1, "
-                "forcing accelerator CCL (e.g. NCCL). This may not be officially supported."
+                "Heterogeneous GPU models detected but RLINF_FORCE_ACCEL_CCL=1, "
+                "forcing NCCL. This may not be officially supported."
             )
         self._no_accel_ccl = (
-            (hetero_models and not force_ccl)
+            (hetero_models and not (force_ccl and all_have_gpu))
             or accel_type == AcceleratorType.NO_ACCEL
             or accel_type not in AcceleratorUtil.CCL_SUPPORT_LIST
         )
