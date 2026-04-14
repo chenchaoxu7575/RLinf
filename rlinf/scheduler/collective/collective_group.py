@@ -336,8 +336,8 @@ class CollectiveGroup:
             self._logger.debug(f"Sync send ID {send_comm_id} done")
             return send_work.wait()
 
-    # Object type names for NVTX labels
-    _OBJECT_TYPE_NAMES = {0: "TENSOR", 1: "TENSOR_LIST", 2: "TENSOR_DICT", 3: "OBJECT", 4: "DATACLASS_WITH_TENSORS"}
+    # Indexed by TENSOR / TENSOR_LIST / TENSOR_DICT / OBJECT / DATACLASS_WITH_TENSORS
+    _OBJECT_TYPE_LABELS = ("TENSOR", "TENSOR_LIST", "TENSOR_DICT", "OBJECT", "DATACLASS_WITH_TENSORS")
 
     def _atomic_send(
         self,
@@ -355,24 +355,20 @@ class CollectiveGroup:
         """
         self._init_process_group(options=options)
         _nvtx = is_channel_nvtx_enabled()
-        _type_name = self._OBJECT_TYPE_NAMES.get(object_type, str(object_type))
+        _type_name = self._OBJECT_TYPE_LABELS[object_type]
         _transport = "NCCL" if tensor_data.has_accel_tensor else "GLOO"
-        if _nvtx:
-            _ctx = nvtx_range(
-                f"collective/send type={_type_name} transport={_transport} "
-                f"peer={self._peer_rank} group={self._group_info.group_name}",
-                color="blue",
+
+        with nvtx_range(
+            f"collective/send type={_type_name} transport={_transport} "
+            f"peer={self._peer_rank} group={self._group_info.group_name}",
+            color="blue", enabled=_nvtx,
+        ):
+            object_type_tensor = torch.tensor(object_type, dtype=torch.int, device="cpu")
+            self._send(object_type_tensor, CollectiveGroup.CPU, comm_id)
+            self._logger.debug(
+                f"Sending object type {object_type} from {self._cur_worker_address.get_name()} in group {self._group_info.group_name}"
             )
-            _ctx.__enter__()
 
-        # First send object type to the destination worker
-        object_type_tensor = torch.tensor(object_type, dtype=torch.int, device="cpu")
-        self._send(object_type_tensor, CollectiveGroup.CPU, comm_id)
-        self._logger.debug(
-            f"Sending object type {object_type} from {self._cur_worker_address.get_name()} in group {self._group_info.group_name}"
-        )
-
-        try:
             if object_type == CollectiveGroup.TENSOR:
                 return self._send_tensor_list(
                     [object],
@@ -411,9 +407,6 @@ class CollectiveGroup:
                 )
             else:
                 raise ValueError(f"Unsupported object type: {object_type}")
-        finally:
-            if _nvtx:
-                _ctx.__exit__(None, None, None)
 
     def recv(
         self,
@@ -487,19 +480,16 @@ class CollectiveGroup:
 
         object_type = object_type_tensor.item()
         _nvtx = is_channel_nvtx_enabled()
-        _type_name = self._OBJECT_TYPE_NAMES.get(object_type, str(object_type))
-        if _nvtx:
-            _ctx = nvtx_range(
-                f"collective/recv type={_type_name} "
-                f"peer={self._peer_rank} group={self._group_info.group_name}",
-                color="green",
-            )
-            _ctx.__enter__()
+        _type_name = self._OBJECT_TYPE_LABELS[object_type]
 
-        self._logger.debug(
-            f"Receiving object type {object_type} from Rank {self._peer_rank} in group {self._group_info.group_name}"
-        )
-        try:
+        with nvtx_range(
+            f"collective/recv type={_type_name} "
+            f"peer={self._peer_rank} group={self._group_info.group_name}",
+            color="green", enabled=_nvtx,
+        ):
+            self._logger.debug(
+                f"Receiving object type {object_type} from Rank {self._peer_rank} in group {self._group_info.group_name}"
+            )
             if object_type == CollectiveGroup.TENSOR:
                 tensor, pb_data = self._recv_tensor_list(comm_id, work=work)
                 assert len(tensor) == 1, (
@@ -516,9 +506,6 @@ class CollectiveGroup:
                 data, pb_data = self._recv_object(comm_id, work=work)
             else:
                 raise ValueError(f"Unsupported object type: {object_type}")
-        finally:
-            if _nvtx:
-                _ctx.__exit__(None, None, None)
         if pb_data is not None:
             return data, pb_data
         else:
@@ -1618,7 +1605,7 @@ class CollectiveGroup:
         This is modified version of dist.distributed_c10d._object_to_tensor that removes the group argument.
         """
         _nvtx = is_channel_nvtx_enabled()
-        with nvtx_range("collective/serialize", color="orange") if _nvtx else nullcontext():
+        with nvtx_range("collective/serialize", color="orange", enabled=_nvtx):
             f = io.BytesIO()
             try:
                 Pickler(f).dump(obj)
@@ -1638,7 +1625,7 @@ class CollectiveGroup:
         This is modified version of dist.distributed_c10d._tensor_to_object that removes the group argument.
         """
         _nvtx = is_channel_nvtx_enabled()
-        with nvtx_range("collective/deserialize", color="orange") if _nvtx else nullcontext():
+        with nvtx_range("collective/deserialize", color="orange", enabled=_nvtx):
             tensor = tensor.cpu()
             buf = tensor.numpy().tobytes()[:tensor_size]
             result = Unpickler(io.BytesIO(buf)).load()
@@ -2055,7 +2042,7 @@ class CollectiveGroup:
         cpu_bytes = sum(t.numel() * t.element_size() for t in cpu_tensors)
         accel_bytes = sum(t.numel() * t.element_size() for t in accel_tensors)
 
-        with nvtx_range(f"collective/send_tensor_list/metadata n_tensors={len(tensors)}") if _nvtx else nullcontext():
+        with nvtx_range(f"collective/send_tensor_list/metadata n_tensors={len(tensors)}", enabled=_nvtx):
             metadata_tensor, metadata_tensor_size = self._object_to_tensor(metadata, "cpu")
             self._send(
                 metadata_tensor_size,
@@ -2075,7 +2062,10 @@ class CollectiveGroup:
         )
 
         with self._track_payload_time(work=work):
-            with nvtx_range(f"collective/send_tensor_list/cpu_payload n={len(cpu_tensors)} bytes={cpu_bytes}") if _nvtx and cpu_tensors else nullcontext():
+            with nvtx_range(
+                f"collective/send_tensor_list/cpu_payload n={len(cpu_tensors)} bytes={cpu_bytes}",
+                enabled=_nvtx and bool(cpu_tensors),
+            ):
                 for tensor in cpu_tensors:
                     last_work = self._send(
                         tensor,
@@ -2087,7 +2077,10 @@ class CollectiveGroup:
                 # Handle CUDA tensor sending with IPC if the peer worker is on the same device
                 check_cuda_device_result = self._check_same_device_with_peer()
                 _ipc_mode = {0: "uncertain_peer", 1: "IPC", -1: "NCCL"}.get(check_cuda_device_result, "NCCL")
-                with nvtx_range(f"collective/send_tensor_list/accel_payload n={len(accel_tensors)} bytes={accel_bytes} mode={_ipc_mode}") if _nvtx else nullcontext():
+                with nvtx_range(
+                    f"collective/send_tensor_list/accel_payload n={len(accel_tensors)} bytes={accel_bytes} mode={_ipc_mode}",
+                    enabled=_nvtx,
+                ):
                     if check_cuda_device_result == 0:
                         last_work = self._send_tensor_list_to_uncertain_peer(
                             accel_tensors, comm_id, async_op
@@ -2129,7 +2122,7 @@ class CollectiveGroup:
         self._logger.debug(
             f"Receiving tensor list metadata from Rank {self._peer_rank} in group {self._group_info.group_name}"
         )
-        with nvtx_range("collective/recv_tensor_list/metadata") if _nvtx else nullcontext():
+        with nvtx_range("collective/recv_tensor_list/metadata", enabled=_nvtx):
             metadata_size = torch.empty(1, dtype=torch.long, device="cpu")
             self._recv(metadata_size, CollectiveGroup.CPU, comm_id)
             metadata_tensor = torch.empty(
@@ -2180,7 +2173,10 @@ class CollectiveGroup:
 
         with self._track_payload_time(work=work):
             cpu_bytes = sum(t.numel() * t.element_size() for t in cpu_tensors)
-            with nvtx_range(f"collective/recv_tensor_list/cpu_payload n={len(cpu_tensors)} bytes={cpu_bytes}") if _nvtx and cpu_tensors else nullcontext():
+            with nvtx_range(
+                f"collective/recv_tensor_list/cpu_payload n={len(cpu_tensors)} bytes={cpu_bytes}",
+                enabled=_nvtx and bool(cpu_tensors),
+            ):
                 for tensor in cpu_tensors:
                     self._recv(tensor, CollectiveGroup.CPU, comm_id)
             if has_accel_tensor:
@@ -2189,7 +2185,10 @@ class CollectiveGroup:
                 )
                 check_cuda_device_result = self._check_same_device_with_peer()
                 _ipc_mode = {0: "uncertain_peer", 1: "IPC", -1: "NCCL"}.get(check_cuda_device_result, "NCCL")
-                with nvtx_range(f"collective/recv_tensor_list/accel_payload n={len(accel_entries)} bytes={accel_bytes} mode={_ipc_mode}") if _nvtx else nullcontext():
+                with nvtx_range(
+                    f"collective/recv_tensor_list/accel_payload n={len(accel_entries)} bytes={accel_bytes} mode={_ipc_mode}",
+                    enabled=_nvtx,
+                ):
                     if check_cuda_device_result == 0:
                         accel_shapes = [
                             shape_dtype for _, _, shape_dtype in accel_entries
