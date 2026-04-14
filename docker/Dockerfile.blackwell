@@ -1,0 +1,186 @@
+# ===========================================================
+# RLinf Blackwell Container
+# Supports: B200/B100 (sm_100), RTX 5000 Pro/5090/6000 (sm_120)
+#
+# Build (on any x86_64 machine, GPU not required):
+#   docker build -f Dockerfile.blackwell -t rlinf-blackwell:latest .
+#
+# The build context should be the RLinf repo root (upstream/main),
+# which provides pyproject.toml and requirements/.
+# ===========================================================
+FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04
+
+SHELL ["/bin/bash", "-c"]
+ENV DEBIAN_FRONTEND=noninteractive
+
+# ===========================================================
+# System deps
+# ===========================================================
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git vim libibverbs-dev openssh-server sudo runit runit-systemd tmux \
+    build-essential python3-dev cmake pkg-config iproute2 pciutils python3 python3-pip \
+    wget unzip curl \
+    autoconf automake libtool \
+    infiniband-diags ibverbs-utils \
+    libxcb-cursor0 libxcb-xinput0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# ===========================================================
+# Nsight Systems 2025.3.1
+# ===========================================================
+RUN cd /tmp && \
+    wget -q https://developer.nvidia.com/downloads/assets/tools/secure/nsight-systems/2025_3/nsight-systems-2025.3.1_2025.3.1.90-1_amd64.deb && \
+    apt-get update && \
+    (dpkg -i nsight-systems-2025.3.1_2025.3.1.90-1_amd64.deb || true) && \
+    apt-get install -f -y && \
+    rm -f nsight-systems-2025.3.1_2025.3.1.90-1_amd64.deb && \
+    rm -rf /var/lib/apt/lists/* && \
+    ln -sf /opt/nvidia/nsight-systems/2025.3.1/target-linux-x64/nsys /usr/local/cuda/bin/nsys && \
+    ln -sf /opt/nvidia/nsight-systems/2025.3.1/target-linux-x64/nsys-ui /usr/local/cuda/bin/nsys-ui && \
+    nsys --version
+
+# ===========================================================
+# pip / uv
+# ===========================================================
+RUN python3 -m pip install --upgrade pip setuptools wheel uv
+
+# ===========================================================
+# Venv layout (same as RLinf official image)
+# ===========================================================
+ENV HF_HOME=/opt/.cache/huggingface
+ENV UV_PATH=/opt/venv
+ENV UV_LINK_MODE=hardlink
+ENV UV_CACHE_DIR=$UV_PATH/.cache
+ENV UV_PYTHON_INSTALL_DIR=${UV_PATH}/.python
+ENV NVIDIA_DRIVER_CAPABILITIES="all"
+
+RUN mkdir -p $HF_HOME $UV_PATH
+WORKDIR $UV_PATH
+
+# ===========================================================
+# Copy RLinf project files (from build context = RLinf repo)
+# ===========================================================
+COPY pyproject.toml $UV_PATH/pyproject.toml
+COPY requirements $UV_PATH/requirements
+
+# ===========================================================
+# switch_env utility
+# ===========================================================
+RUN cat <<'SCRIPT' > /usr/local/bin/switch_env
+#!/bin/bash
+if [ -z "$1" ]; then echo "Usage: switch_env <env_name>"; exit 1; fi
+if [ ! -d "/opt/venv/$1" ]; then echo "Environment $1 does not exist."; exit 1; fi
+source /opt/venv/$1/bin/activate
+SCRIPT
+RUN chmod +x /usr/local/bin/switch_env
+
+# ===========================================================
+# Install openpi + openvla envs via RLinf install.sh
+#
+# UV_TORCH_BACKEND=auto during install to avoid resolution
+# failures (e.g. torchcodec==0.2 has no cu128 wheel).
+# We force exact cu128 torch wheels in the next step anyway.
+# ===========================================================
+RUN export UV_TORCH_BACKEND=auto && bash requirements/install.sh embodied --venv openpi --model openpi --env maniskill_libero
+RUN export UV_TORCH_BACKEND=auto && bash requirements/install.sh embodied --venv openvla --model openvla --env maniskill_libero
+
+# ===========================================================
+# Fix torch → exact cu128 wheels
+#
+# install.sh may resolve to cu124 due to UV_TORCH_BACKEND
+# detection issues. Force exact versions here.
+#
+# Versions pinned to match openpi 0.1.0 constraints:
+#   torch==2.7.1, torchvision==0.22.1, torchaudio==2.7.1
+# ===========================================================
+ARG TORCH_WHL=https://download-r2.pytorch.org/whl/cu128/torch-2.7.1+cu128-cp311-cp311-manylinux_2_28_x86_64.whl
+ARG VISION_WHL=https://download-r2.pytorch.org/whl/cu128/torchvision-0.22.1+cu128-cp311-cp311-manylinux_2_28_x86_64.whl
+ARG AUDIO_WHL=https://download-r2.pytorch.org/whl/cu128/torchaudio-2.7.1+cu128-cp311-cp311-manylinux_2_28_x86_64.whl
+
+# First --no-deps to swap torch without touching other packages,
+# then install torch again WITH deps to pull cu128 CUDA runtime libs.
+RUN bash -c "source ${UV_PATH}/openpi/bin/activate && \
+    pip install --no-deps --no-cache-dir ${TORCH_WHL} ${VISION_WHL} ${AUDIO_WHL} && \
+    pip install --no-cache-dir ${TORCH_WHL}"
+
+RUN bash -c "source ${UV_PATH}/openvla/bin/activate && \
+    pip install --no-deps --no-cache-dir ${TORCH_WHL} ${VISION_WHL} ${AUDIO_WHL} && \
+    pip install --no-cache-dir ${TORCH_WHL}"
+
+# ===========================================================
+# Upgrade NCCL runtime to 2.28.9
+#
+# NCCL 2.26.2 (bundled with torch 2.7.1) has known Blackwell
+# bugs: out-of-bounds write in ncclDevKernel_SendRecv.
+# See: https://github.com/pytorch/pytorch/issues/170003
+# ===========================================================
+RUN bash -c "source ${UV_PATH}/openpi/bin/activate && pip install nvidia-nccl-cu12==2.28.9"
+RUN bash -c "source ${UV_PATH}/openvla/bin/activate && pip install nvidia-nccl-cu12==2.28.9"
+
+# ===========================================================
+# Fix dependencies
+#
+# openpi 0.1.0 requires numpy<2.0; torch upgrade may pull
+# numpy 2.x. Pin back to compatible versions.
+# ===========================================================
+RUN bash -c "source ${UV_PATH}/openpi/bin/activate && \
+    pip install numpy==1.26.4 'typeguard>=2.7,<3.0.0' 'rich>=13.6.0,<14.0.0'"
+RUN bash -c "source ${UV_PATH}/openvla/bin/activate && \
+    pip install numpy==1.26.4 'typeguard>=2.7,<3.0.0' 'rich>=13.6.0,<14.0.0'"
+
+# ===========================================================
+# Reinstall openpi (--no-deps to avoid pulling different torch)
+# ===========================================================
+RUN bash -c "source ${UV_PATH}/openpi/bin/activate && \
+    pip install git+https://github.com/RLinf/openpi --no-deps"
+RUN bash -c "source ${UV_PATH}/openvla/bin/activate && \
+    pip install git+https://github.com/openvla/openvla.git --no-build-isolation --no-deps"
+
+# ===========================================================
+# flash-attn (cross-compile for sm_90 + sm_120)
+#
+# This builds CUDA kernels for both Hopper and Blackwell.
+# No GPU required at build time — nvcc cross-compiles.
+# ===========================================================
+# 9.0=Hopper(H20/H100), 10.0=Blackwell(B200/B100), 12.0=Blackwell(RTX5090/5000Pro/6000)
+RUN bash -c "source ${UV_PATH}/openpi/bin/activate && \
+    TORCH_CUDA_ARCH_LIST='9.0;10.0;12.0' MAX_JOBS=${MAX_JOBS:-$(nproc)} \
+    pip install flash-attn==2.7.4.post1 --no-build-isolation --no-deps --no-cache-dir --force-reinstall"
+
+# ===========================================================
+# nvtx (NVTX profiling annotations)
+# ===========================================================
+RUN bash -c "source ${UV_PATH}/openpi/bin/activate && pip install nvtx"
+RUN bash -c "source ${UV_PATH}/openvla/bin/activate && pip install nvtx"
+
+# ===========================================================
+# nccl-rdma-sharp-plugins (IB/RoCE RDMA support)
+#
+# Must be compiled against the NCCL version in use (2.28.9).
+# The plugin .so is loaded by NCCL at runtime.
+# ===========================================================
+RUN cd /tmp && \
+    git clone --depth 1 https://github.com/Mellanox/nccl-rdma-sharp-plugins.git && \
+    cd nccl-rdma-sharp-plugins && \
+    ./autogen.sh && \
+    ./configure --prefix=/usr/local --with-cuda=/usr/local/cuda \
+        --with-nccl=${UV_PATH}/openpi/lib/python3.11/site-packages/nvidia/nccl && \
+    make -j$(nproc) && make install && ldconfig && \
+    rm -rf /tmp/nccl-rdma-sharp-plugins
+
+# ===========================================================
+# Default env
+# ===========================================================
+RUN echo "source ${UV_PATH}/openpi/bin/activate" >> ~/.bashrc
+
+# ===========================================================
+# Verify
+# ===========================================================
+RUN bash -c "source ${UV_PATH}/openpi/bin/activate && \
+    python -c \"import torch; print('torch:', torch.__version__, 'CUDA:', torch.version.cuda)\" && \
+    python -c \"import numpy; print('numpy:', numpy.__version__)\" && \
+    python -c \"import nvtx; print('nvtx: OK')\" && \
+    python -c \"import openpi; print('openpi: OK')\" && \
+    python -c \"from flash_attn import flash_attn_func; print('flash_attn: OK')\" && \
+    (nsys --version || echo 'WARN: nsys not found, install manually') && \
+    ls /usr/local/lib/libnccl-net.so"
