@@ -28,7 +28,7 @@ offering practical guidance to help you fully optimize your RL post-training wor
 
 - :doc:`logger`  
    Introduces how to visualize and track key metrics during your training process.  
-   Currently, we support three backends for experiment tracking and visualization: 
+   Currently, we support three backends for experiment tracking and visualization:
    TensorBoard, Weights & Biases (wandb), and SwanLab.
 
 - :doc:`weight_syncer`
@@ -45,6 +45,15 @@ offering practical guidance to help you fully optimize your RL post-training wor
    Introduces how to use Megatron-Bridge to integrate Megatron-LM training backend,
    to support HuggingFace-format checkpoint training.
 
+- :doc:`nsight_code_design`
+   Explains the code architecture of RLinf's Nsight profiler integration and
+   NVTX annotation framework -- config flow, annotation layers, and how to
+   add new instrumentation.
+
+- :doc:`nsight_profiler_guide`
+   Hands-on guide to profiling RLinf with Nsight Systems.  Walks through a
+   multi-node async SAC experiment and shows how to read the timeline.
+
 .. toctree::
    :hidden:
    :maxdepth: 2
@@ -58,3 +67,5 @@ offering practical guidance to help you fully optimize your RL post-training wor
    nsight
    weight_syncer
    mbridge
+   nsight_code_design
+   nsight_profiler_guide
