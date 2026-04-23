@@ -1570,9 +1570,17 @@ class CollectiveGroup:
                 elif check_cuda_device_result == 1:
                     work = self._send_tensor_list_via_ipc(accel_tensors, comm_id, async_op)
                 else:
-                    for tensor in accel_tensors:
+                    if len(accel_tensors) > 1:
+                        flat_buffer = torch.cat([t.contiguous().reshape(-1).view(torch.uint8) for t in accel_tensors])
                         work = self._send(
-                            tensor,
+                            flat_buffer,
+                            device=CollectiveGroup.ACCEL,
+                            comm_id=comm_id,
+                            async_op=async_op,
+                        )
+                    else:
+                        work = self._send(
+                            accel_tensors[0],
                             device=CollectiveGroup.ACCEL,
                             comm_id=comm_id,
                             async_op=async_op,
@@ -1666,8 +1674,19 @@ class CollectiveGroup:
                     for (idx, _, _), tensor in zip(accel_entries, received_accel_tensors):
                         tensors[idx] = tensor
                 else:
-                    for _, tensor, _ in accel_entries:
-                        self._recv(tensor, CollectiveGroup.ACCEL, comm_id)
+                    if len(accel_entries) > 1:
+                        total_bytes = sum(t.nelement() * t.element_size() for _, t, _ in accel_entries)
+                        flat_buffer = torch.empty(total_bytes, dtype=torch.uint8,
+                                                  device=Worker.torch_platform.current_device())
+                        self._recv(flat_buffer, CollectiveGroup.ACCEL, comm_id)
+                        offset = 0
+                        for idx, tensor, _ in accel_entries:
+                            nbytes = tensor.nelement() * tensor.element_size()
+                            tensor.view(-1).copy_(flat_buffer[offset:offset + nbytes].view(tensor.dtype))
+                            offset += nbytes
+                    else:
+                        for _, tensor, _ in accel_entries:
+                            self._recv(tensor, CollectiveGroup.ACCEL, comm_id)
         return tensors, pb_data
 
     def _send_tensor_dict(
@@ -1696,9 +1715,6 @@ class CollectiveGroup:
         values = list(tensor_dict.values())
         keys = (keys, piggyback_payload)
         keys_tensor, key_tensor_size = self._object_to_tensor(keys, "cpu")
-        self._logger.debug(
-            f"Sending {len(keys)} keys to Rank {self._peer_rank} in group {self._group_info.group_name}"
-        )
         self._send(
             key_tensor_size,
             device=CollectiveGroup.CPU,

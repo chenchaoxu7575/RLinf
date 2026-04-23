@@ -78,6 +78,8 @@ class FSDPStrategy(FSDPStrategyBase):
             self.cfg.fsdp_config.backward_prefetch
         )
 
+        sync_states = device_mesh.size() > 1
+
         fsdp_model = FSDP(
             module=model,
             param_init_fn=init_fn,
@@ -85,7 +87,7 @@ class FSDPStrategy(FSDPStrategyBase):
             device_id=int(os.environ["LOCAL_RANK"]),
             sharding_strategy=sharding_strategy,
             mixed_precision=mixed_precision,
-            sync_module_states=True,
+            sync_module_states=sync_states,
             device_mesh=device_mesh,
             forward_prefetch=self.cfg.fsdp_config.forward_prefetch,
             backward_prefetch=backward_prefetch,
