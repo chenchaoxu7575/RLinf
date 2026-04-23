@@ -16,11 +16,11 @@ hydra:
 # 2-Node 1-Rank Async DSRL Pi0.5 — RTX PRO 5000 (GLOO baseline)
 #   Weight sync via GLOO/TCP (no NCCL). Slow baseline for comparison.
 #
-#   Node 0 (SH-OV-SERVER-04): actor — GPU0
-#   Node 1 (SH-OV-M003):      rollout + env — GPU0
+#   Node 0: actor — GPU0
+#   Node 1: rollout + env — GPU0
 #
 # Network:
-#   Ethernet: Node0 ens3f0np0, Node1 eno2np1
+#   Update GLOO/NCCL_SOCKET_IFNAME to match your ethernet interface names
 # ============================================================
 cluster:
   num_nodes: 2

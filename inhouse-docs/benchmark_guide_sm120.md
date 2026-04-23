@@ -4,7 +4,7 @@
 
 **Hardware**:
 - 2 nodes with NVIDIA GPUs (tested on RTX PRO 5000 Blackwell, sm_120), IB 400Gbps interconnect
-- Reference setup: SH-OV-SERVER-04 (8 GPU) + SH-OV-M003 (4 GPU)
+- Reference setup: Node 0 (8 GPU) + Node 1 (4 GPU)
 
 **Software**:
 
@@ -108,7 +108,7 @@ ip addr show | grep "inet " | grep -v 127.0.0.1
 
 **Node 0 (head):**
 ```bash
-export HEAD_IP=<NODE0_ETH_IP>   # e.g. 10.172.177.55
+export HEAD_IP=<NODE0_ETH_IP>   # e.g. 192.168.1.100
 ulimit -n 65536
 export RLINF_NODE_RANK=0
 ray start --head --port=6379 --node-ip-address=$HEAD_IP

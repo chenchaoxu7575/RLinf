@@ -16,11 +16,11 @@ hydra:
 # 2-Node 4-Rank Async DSRL Pi0.5 — RTX PRO 5000 (NCCL/IB + GDR)
 #   4 rollout replicas on Node 1, 4 envs. Weight sync via NCCL/IB.
 #
-#   Node 0 (SH-OV-SERVER-04): actor — GPU0
-#   Node 1 (SH-OV-M003):      rollout — GPU0-3 (4 replicas), env — CPU (4 envs)
+#   Node 0: actor — GPU0
+#   Node 1: rollout — GPU0-3 (4 replicas), env — CPU (4 envs)
 #
 # Network: IB 400Gbps (opensm required on head)
-#   Ethernet: Node0 ens3f0np0, Node1 eno2np1
+#   Update GLOO/NCCL_SOCKET_IFNAME and NCCL_IB_HCA to match your hardware
 # ============================================================
 cluster:
   num_nodes: 2
