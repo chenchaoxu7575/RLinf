@@ -162,7 +162,7 @@ After both experiments complete, run on head node (inside container):
 ```bash
 # Set log dirs (auto-detect latest runs)
 GLOO_LOG=$(ls -td /workspace/rlinf_pub/RLinf/logs/*gloo* | head -1)
-NCCL_LOG=$(ls -td /workspace/rlinf_pub/RLinf/logs/*nccl*1rank* | head -1)
+NCCL_LOG=$(ls -td /workspace/rlinf_pub/RLinf/logs/*nccl* | head -1)
 
 # Step time comparison (last 3 steps)
 echo "=== GLOO ===" && grep "Step Time" $GLOO_LOG/run_embodiment.log | tail -3
@@ -185,9 +185,22 @@ nsys-rep files are under each node's Ray session dir. Run inside container:
 ACTOR_REP=$(find /tmp/ray/session_latest/logs/nsight/ -name "ActorGroup*.nsys-rep" | head -1)
 echo "Actor profile: $ACTOR_REP"
 
-# Extract NVTX summary — look for sync_model_to_rollout duration
-nsys stats --report nvtxsum "$ACTOR_REP" 2>/dev/null | grep -i "sync_model"
+# NVTX start/end range summary — weight sync and tensor transfer breakdown
+nsys stats --report nvtx_startend_sum "$ACTOR_REP" 2>/dev/null \
+    | grep -E "Time \(%\)|^ -+ |actor/sync_model_to_rollout|collective/send |send_tensor_list"
 ```
+
+Example output:
+```
+ Time (%)  Total Time (ns)  Instances    Avg (ns)       Med (ns)      Min (ns)     Max (ns)                                              Range
+ --------  ---------------  ---------  -------------  -------------  -----------  -----------  --------------------------------------------------------------------------------------------
+      0.2        578584574          3    192861524.7    173818656.0    162078389    242687529  :actor/sync_model_to_rollout
+      0.0         74527888          3     24842629.3     23265165.0     22521519     28741204  :collective/send type=TENSOR_DICT transport=NCCL peer=1 group=cg-ActorGroup:0-RolloutGroup:0
+      0.0         52880449          3     17626816.3     17680466.0     17264448     17935535  :collective/send_tensor_list/accel_payload n=1001 bytes=8535964788 mode=NCCL
+      0.0          4785813          3      1595271.0      1373094.0      1339283      2073436  :collective/send_tensor_list/metadata n_tensors=1001
+```
+
+Key metrics: `actor/sync_model_to_rollout` Avg shows end-to-end weight sync time (~173ms median for NCCL/IB).
 
 Or open `.nsys-rep` in Nsight Systems GUI — look for `actor/sync_model_to_rollout` NVTX range. Check NCCL row: active kernels = NCCL/IB, empty + DtoH copies = GLOO fallback.
 

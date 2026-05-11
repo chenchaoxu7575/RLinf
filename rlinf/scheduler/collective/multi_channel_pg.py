@@ -100,6 +100,12 @@ class MultiChannelProcessGroup:
         )
         self._accel_type = accel_type
 
+        _backend_str = self._accel_ccl_backend or "GLOO-only"
+        self._logger.info(
+            f"[CommBackend] group={group_info.group_name} backend={_backend_str} "
+            f"hetero={hetero_models} force_ccl={force_ccl}"
+        )
+
         self._send_accel_ccl_process_groups: list[dist.ProcessGroup] = [
             None for _ in range(num_channels)
         ]
