@@ -1,0 +1,43 @@
+# Minimal example: keep GLOO traffic on the H20/L20 high-speed NICs.
+
+cluster:
+  num_nodes: 2
+  distributed_channel: true
+
+  component_placement:
+    actor:
+      node_group: h20
+      placement: 0-0
+    rollout:
+      node_group: l20
+      placement: 0-0
+    env:
+      node_group: l20_node
+      placement: 0
+
+  node_groups:
+    - label: h20
+      node_ranks: 0-0
+      env_configs:
+        - node_ranks: 0-0
+          python_interpreter_path: /opt/venv/openvla/bin/python
+          env_vars:
+            - GLOO_SOCKET_IFNAME: "enp26s0f0np0"
+
+    - label: l20
+      node_ranks: 1-1
+      env_configs:
+        - node_ranks: 1-1
+          python_interpreter_path: /opt/venv/openvla/bin/python
+          env_vars:
+            - GLOO_SOCKET_IFNAME: "ens1006f0np0"
+
+    - label: l20_node
+      node_ranks: 1-1
+      ignore_hardware: true
+      env_configs:
+        - node_ranks: 1-1
+          python_interpreter_path: /opt/venv/openvla/bin/python
+          env_vars:
+            - GLOO_SOCKET_IFNAME: "ens1006f0np0"
+

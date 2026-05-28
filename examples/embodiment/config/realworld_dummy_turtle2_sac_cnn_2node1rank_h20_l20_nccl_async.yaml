@@ -1,0 +1,183 @@
+defaults:
+  - env/realworld_button@env.train
+  - env/realworld_button@env.eval
+  - model/cnn_policy@actor.model
+  - training_backend/fsdp@actor.fsdp_config
+  - weight_syncer/patch_syncer@weight_syncer
+  - override hydra/job_logging: stdout
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}/config/
+
+cluster:
+  num_nodes: 2
+  distributed_channel: true
+  component_placement:
+    actor:
+      node_group: h20
+      placement: 0-0
+    rollout:
+      node_group: l20
+      placement: 0-0
+    env:
+      node_group: l20_node
+      placement: 0
+  node_groups:
+    - label: h20
+      node_ranks: 0-0
+      env_configs:
+        - node_ranks: 0-0
+          python_interpreter_path: /opt/venv/openvla/bin/python
+          env_vars:
+            - RLINF_FORCE_ACCEL_CCL: "1"
+            - NCCL_CROSS_NIC: "1"
+            - GLOO_SOCKET_IFNAME: "enp26s0f0np0"
+            - NCCL_SOCKET_IFNAME: "enp26s0f0np0"
+            - NCCL_IB_HCA: "mlx5_0"
+    - label: l20
+      node_ranks: 1-1
+      env_configs:
+        - node_ranks: 1-1
+          python_interpreter_path: /opt/venv/openvla/bin/python
+          env_vars:
+            - RLINF_FORCE_ACCEL_CCL: "1"
+            - NCCL_CROSS_NIC: "1"
+            - GLOO_SOCKET_IFNAME: "ens1006f0np0"
+            - NCCL_SOCKET_IFNAME: "ens1006f0np0"
+            - NCCL_IB_HCA: "mlx5_0"
+    - label: l20_node
+      node_ranks: 1-1
+      ignore_hardware: true
+      env_configs:
+        - node_ranks: 1-1
+          python_interpreter_path: /opt/venv/openvla/bin/python
+          env_vars:
+            - GLOO_SOCKET_IFNAME: "ens1006f0np0"
+
+runner:
+  task_type: embodied
+  logger:
+    log_path: "../results"
+    project_name: rlinf
+    experiment_name: "turtle2_sac_cnn_2node1rank_h20_l20_nccl_async"
+    logger_backends: ["tensorboard"]
+
+  max_epochs: 3
+  max_steps: -1
+  only_eval: False
+  val_check_interval: -1
+  save_interval: -1
+  weight_sync_interval: 1
+  resume_dir: null
+  ckpt_path: null
+
+algorithm:
+  update_epoch: 32
+  group_size: 1
+  agg_q: min
+  actor_agg_q: mean
+  rollout_epoch: 1
+  eval_rollout_epoch: 1
+  adv_type: embodied_sac
+  loss_type: embodied_sac
+  loss_agg_func: "token-mean"
+  bootstrap_type: always
+  gamma: 0.8
+  tau: 0.01
+
+  entropy_tuning:
+    alpha_type: softplus
+    initial_alpha: 0.01
+    target_entropy: -7
+    optim:
+      lr: 3.0e-4
+      lr_scheduler: torch_constant
+      clip_grad: 10.0
+
+  replay_buffer:
+    enable_cache: True
+    cache_size: 200
+    sample_window_size: 200
+    min_buffer_size: 1
+    auto_save: False
+
+  target_update_freq: 1
+  sampling_params:
+    do_sample: True
+    temperature_train: 1.0
+    temperature_eval: 0.6
+    top_k: 50
+    top_p: 1.0
+    repetition_penalty: 1.0
+  length_params:
+    max_new_token: 7
+    max_length: 1024
+    min_length: 1
+
+env:
+  group_name: "EnvGroup"
+  train:
+    total_num_envs: 1
+    override_cfg:
+      is_dummy: True
+      use_arm_ids: [1]
+      use_camera_ids: [2]
+      target_ee_pose: [[0, 0, 0, 0, 0, 0], [0.0, 0.0, 0.15, 0.0, 1, 0.0]]
+  eval:
+    total_num_envs: 1
+    override_cfg:
+      is_dummy: True
+      use_arm_ids: [1]
+      use_camera_ids: [2]
+      target_ee_pose: [[0, 0, 0, 0, 0, 0], [0.0, 0.0, 0.15, 0.0, 1, 0.0]]
+
+rollout:
+  group_name: "RolloutGroup"
+  backend: "huggingface"
+  enable_offload: False
+  pipeline_stage_num: 1
+  collect_transitions: True
+  collect_prev_infos: False
+  model:
+    model_path: "/workspace/rlinf_pub/models/RLinf-ResNet10-pretrained"
+    precision: ${actor.model.precision}
+  enable_torch_compile: False
+  enable_cuda_graph: False
+
+actor:
+  group_name: "ActorGroup"
+  training_backend: "fsdp"
+  micro_batch_size: 1024
+  global_batch_size: 1024
+  seed: 1234
+  enable_offload: False
+  model:
+    model_path: "/workspace/rlinf_pub/models/RLinf-ResNet10-pretrained"
+    state_dim: 6
+    action_dim: 6
+  optim:
+    clip_grad: 10.0
+    lr: 3e-4
+    lr_scheduler: torch_constant
+  critic_optim:
+    clip_grad: 10.0
+    lr: 3e-4
+    lr_scheduler: torch_constant
+  fsdp_config:
+    strategy: "fsdp"
+    sharding_strategy: "no_shard"
+    mixed_precision:
+      param_dtype: ${actor.model.precision}
+      reduce_dtype: ${actor.model.precision}
+      buffer_dtype: ${actor.model.precision}
+
+reward:
+  use_reward_model: False
+
+critic:
+  use_critic_model: False
+
