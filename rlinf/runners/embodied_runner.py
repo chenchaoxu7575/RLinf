@@ -74,10 +74,14 @@ class EmbodiedRunner:
         self.overlap_env_bootstrap = bool(
             self.cfg.runner.get("overlap_env_bootstrap", False)
         )
+        distributed_channel = self.cfg.cluster.get("distributed_channel", False)
+
         # Data channels
-        self.env_channel = Channel.create("Env")
-        self.rollout_channel = Channel.create("Rollout")
-        self.actor_channel = Channel.create("Actor")
+        self.env_channel = Channel.create("Env", distributed=distributed_channel)
+        self.rollout_channel = Channel.create(
+            "Rollout", distributed=distributed_channel
+        )
+        self.actor_channel = Channel.create("Actor", distributed=distributed_channel)
         if self.reward is not None:
             self.reward_channel = Channel.create("Reward")
         else:
