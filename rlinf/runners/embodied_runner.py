@@ -145,6 +145,12 @@ class EmbodiedRunner:
         env_handle.wait()
         self.actor.init_worker().wait()
 
+        # Eagerly initialize cross-node process groups before the first train step.
+        if self.cfg.cluster.get("num_nodes", 1) > 1:
+            self.logger.info("Warming up cross-node communication...")
+            self.update_rollout_weights()
+            self.logger.info("Cross-node communication warmup complete.")
+
         resume_dir = self.cfg.runner.get("resume_dir", None)
         if resume_dir is None:
             return

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+import os
 from datetime import timedelta
 from typing import Optional
 
@@ -59,7 +60,7 @@ class MultiChannelProcessGroup:
         self._cur_rank = cur_rank
         self._peer_rank = 1 if cur_rank == 0 else 0
         self._num_channels = num_channels
-        self._logger = logger
+        self._logger = logger or logging.getLogger(__name__)
         self._is_initialized = False
         self._no_accel_ccl = False
         self._group_name = None
@@ -68,16 +69,39 @@ class MultiChannelProcessGroup:
         # Check if all workers have the same accelerator type
         accel_type = group_info.workers[0].accelerator_type
         accel_model = group_info.workers[0].accelerator_model
-        self._no_accel_ccl = (
-            # Hetero accelerator models in the same group, disable CCL
-            # NCCL for example does not support mixed GPU models
-            any(
-                worker.accelerator_model != accel_model for worker in group_info.workers
+        force_accel_ccl = os.getenv("RLINF_FORCE_ACCEL_CCL", "0") == "1"
+        hetero_models = any(
+            worker.accelerator_model != accel_model for worker in group_info.workers
+        )
+        same_accel_type = all(
+            worker.accelerator_type == accel_type for worker in group_info.workers
+        )
+        all_have_accel = all(
+            worker.accelerator_type != AcceleratorType.NO_ACCEL
+            and worker.accelerator_model != ""
+            and "Channel" not in worker.address.get_name()
+            and "Metric" not in worker.address.get_name()
+            for worker in group_info.workers
+        )
+        supported_accel_ccl = accel_type in AcceleratorUtil.CCL_SUPPORT_LIST
+        force_allowed = (
+            force_accel_ccl and all_have_accel and same_accel_type and supported_accel_ccl
+        )
+        if hetero_models and force_allowed:
+            self._logger.warning(
+                "Heterogeneous GPU models detected but RLINF_FORCE_ACCEL_CCL=1, "
+                "forcing accelerator CCL. This may not be officially supported."
             )
+        self._no_accel_ccl = (
+            # Hetero accelerator models normally disable CCL.
+            # H20/L20 experiments can override this for real GPU-only groups.
+            (hetero_models and not force_allowed)
             # CPU only, disable CCL
             or accel_type == AcceleratorType.NO_ACCEL
+            # Mixed accelerator vendors, disable CCL
+            or not same_accel_type
             # Unsupported accelerator CCL type, disable CCL
-            or accel_type not in AcceleratorUtil.CCL_SUPPORT_LIST
+            or not supported_accel_ccl
         )
         self._accel_ccl_backend = (
             AcceleratorUtil.get_ccl_backend(accel_type)
@@ -156,12 +180,11 @@ class MultiChannelProcessGroup:
                 group_name=group_name + f"{self._accel_ccl_backend}_send_0",
                 timeout=timeout,
                 pg_options=pg_options,
-                # device_id=torch.device(f"cuda:{torch.cuda.current_device()}"),
-                # Setting device_id is crucial triggers eager creation of NCCL communicators
-                # https://docs.pytorch.org/docs/stable/distributed.html#torch.distributed.init_process_group
-                # If not, communicators will only be created upon the first collective operation
-                # If the first pair of communications are from different process groups (e.g., two async recvs from a group), the NCCL group creation will hang by then
-                # However, eager creation of NCCL communicators leads to severe GPU memory consumption. So we disable it by default.
+                device_id=torch.device(f"cuda:{torch.cuda.current_device()}")
+                if os.getenv("RLINF_NCCL_EAGER_INIT", "0") == "1"
+                else None,
+                # Setting device_id triggers eager creation of NCCL communicators.
+                # This can avoid lazy-init hangs, but costs extra GPU memory.
             )
 
             for i in range(self._num_channels):
