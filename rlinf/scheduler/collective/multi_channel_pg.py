@@ -73,6 +73,7 @@ class MultiChannelProcessGroup:
         accel_type = group_info.workers[0].accelerator_type
         accel_model = group_info.workers[0].accelerator_model
         force_ccl = os.environ.get("RLINF_FORCE_ACCEL_CCL", "0") == "1"
+        disable_accel_ccl = os.environ.get("RLINF_DISABLE_ACCEL_CCL", "0") == "1"
         hetero_models = any(
             worker.accelerator_model != accel_model for worker in group_info.workers
         )
@@ -89,7 +90,8 @@ class MultiChannelProcessGroup:
                 "forcing NCCL. This may not be officially supported."
             )
         self._no_accel_ccl = (
-            (hetero_models and not (force_ccl and all_have_gpu))
+            disable_accel_ccl
+            or (hetero_models and not (force_ccl and all_have_gpu))
             or accel_type == AcceleratorType.NO_ACCEL
             or accel_type not in AcceleratorUtil.CCL_SUPPORT_LIST
         )
@@ -99,11 +101,11 @@ class MultiChannelProcessGroup:
             else None
         )
         self._accel_type = accel_type
-
-        _backend_str = self._accel_ccl_backend or "GLOO-only"
+        backend_str = self._accel_ccl_backend or "GLOO-only"
         self._logger.info(
-            f"[CommBackend] group={group_info.group_name} backend={_backend_str} "
-            f"hetero={hetero_models} force_ccl={force_ccl}"
+            f"[CommBackend] group={group_info.group_name} backend={backend_str} "
+            f"hetero={hetero_models} force_ccl={force_ccl} "
+            f"disable_accel_ccl={disable_accel_ccl}"
         )
 
         self._send_accel_ccl_process_groups: list[dist.ProcessGroup] = [
