@@ -47,6 +47,7 @@ cluster:
             - NCCL_IB_HCA: "mlx5_0"
             - NCCL_NET_GDR_LEVEL: "SYS"
             - RLINF_FORCE_ACCEL_CCL: "1"
+            - RLINF_DISABLE_ACCEL_CCL: "0"
     - label: node1
       node_ranks: 1-1
       env_configs:
@@ -58,6 +59,7 @@ cluster:
             - NCCL_IB_HCA: "mlx5_0"
             - NCCL_NET_GDR_LEVEL: "SYS"
             - RLINF_FORCE_ACCEL_CCL: "1"
+            - RLINF_DISABLE_ACCEL_CCL: "0"
     - label: node1_cpu
       node_ranks: 1-1
       ignore_hardware: true
