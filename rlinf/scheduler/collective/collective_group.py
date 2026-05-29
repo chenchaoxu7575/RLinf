@@ -1561,7 +1561,12 @@ class CollectiveGroup:
                 )
         if accel_tensors:
             check_cuda_device_result = self._check_same_device_with_peer()
-            _ipc_mode = {0: "uncertain_peer", 1: "IPC", -1: "NCCL"}.get(check_cuda_device_result, "NCCL")
+            no_accel_ccl = bool(getattr(self._mc_group, "_no_accel_ccl", False))
+            _ipc_mode = (
+                "GLOO"
+                if no_accel_ccl and check_cuda_device_result == -1
+                else {0: "uncertain_peer", 1: "IPC", -1: "NCCL"}.get(check_cuda_device_result, "NCCL")
+            )
             with nvtx_range(f"collective/send_tensor_list/accel_payload n={len(accel_tensors)} bytes={accel_bytes} mode={_ipc_mode}") if _nvtx else nullcontext():
                 if check_cuda_device_result == 0:
                     work = self._send_tensor_list_to_uncertain_peer(
@@ -1570,7 +1575,7 @@ class CollectiveGroup:
                 elif check_cuda_device_result == 1:
                     work = self._send_tensor_list_via_ipc(accel_tensors, comm_id, async_op)
                 else:
-                    if len(accel_tensors) > 1:
+                    if len(accel_tensors) > 1 and not no_accel_ccl:
                         flat_buffer = torch.cat([t.contiguous().reshape(-1).view(torch.uint8) for t in accel_tensors])
                         work = self._send(
                             flat_buffer,
@@ -1579,12 +1584,13 @@ class CollectiveGroup:
                             async_op=async_op,
                         )
                     else:
-                        work = self._send(
-                            accel_tensors[0],
-                            device=CollectiveGroup.ACCEL,
-                            comm_id=comm_id,
-                            async_op=async_op,
-                        )
+                        for tensor in accel_tensors:
+                            work = self._send(
+                                tensor,
+                                device=CollectiveGroup.ACCEL,
+                                comm_id=comm_id,
+                                async_op=async_op,
+                            )
 
         if async_op:
             return work
@@ -1660,7 +1666,12 @@ class CollectiveGroup:
         if has_accel_tensor:
             accel_bytes = sum(t.numel() * t.element_size() for _, t, _ in accel_entries)
             check_cuda_device_result = self._check_same_device_with_peer()
-            _ipc_mode = {0: "uncertain_peer", 1: "IPC", -1: "NCCL"}.get(check_cuda_device_result, "NCCL")
+            no_accel_ccl = bool(getattr(self._mc_group, "_no_accel_ccl", False))
+            _ipc_mode = (
+                "GLOO"
+                if no_accel_ccl and check_cuda_device_result == -1
+                else {0: "uncertain_peer", 1: "IPC", -1: "NCCL"}.get(check_cuda_device_result, "NCCL")
+            )
             with nvtx_range(f"collective/recv_tensor_list/accel_payload n={len(accel_entries)} bytes={accel_bytes} mode={_ipc_mode}") if _nvtx else nullcontext():
                 if check_cuda_device_result == 0:
                     accel_shapes = [shape_dtype for _, _, shape_dtype in accel_entries]
@@ -1674,7 +1685,7 @@ class CollectiveGroup:
                     for (idx, _, _), tensor in zip(accel_entries, received_accel_tensors):
                         tensors[idx] = tensor
                 else:
-                    if len(accel_entries) > 1:
+                    if len(accel_entries) > 1 and not no_accel_ccl:
                         total_bytes = sum(t.nelement() * t.element_size() for _, t, _ in accel_entries)
                         flat_buffer = torch.empty(total_bytes, dtype=torch.uint8,
                                                   device=Worker.torch_platform.current_device())
