@@ -27,6 +27,8 @@
 # limitations under the License.
 
 import functools
+import os
+from datetime import timedelta
 from enum import Enum
 from typing import ContextManager, Iterable, Optional, Union
 
@@ -59,7 +61,31 @@ class FSDPVersion(str, Enum):
     FSDP2 = "fsdp2"
 
 
-def create_device_mesh(world_size, fsdp_size):
+def _init_gloo_default_process_group(world_size: int) -> None:
+    if torch.distributed.is_initialized():
+        return
+
+    torch.distributed.init_process_group(
+        backend="gloo",
+        rank=int(os.environ.get("RANK", "0")),
+        world_size=int(os.environ.get("WORLD_SIZE", str(world_size))),
+        timeout=timedelta(
+            minutes=int(os.environ.get("RLINF_TORCH_DIST_TIMEOUT_MINUTES", "30"))
+        ),
+    )
+
+
+def create_device_mesh(world_size, fsdp_size) -> Optional[DeviceMesh]:
+    if os.environ.get("RLINF_DISABLE_ACCEL_CCL", "0") == "1":
+        if world_size != 1:
+            raise RuntimeError(
+                "RLINF_DISABLE_ACCEL_CCL=1 disables accelerator process groups for "
+                "the FSDP backend. This is only supported for single-rank FSDP/no_shard "
+                "runs. Use the NCCL/GDR config for multi-rank FSDP."
+            )
+        _init_gloo_default_process_group(world_size)
+        return None
+
     if fsdp_size < 0 or fsdp_size >= world_size:
         device_mesh = init_device_mesh(
             Worker.torch_device_type, mesh_shape=(world_size,), mesh_dim_names=["fsdp"]

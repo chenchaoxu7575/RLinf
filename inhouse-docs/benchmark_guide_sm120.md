@@ -239,7 +239,7 @@ For detailed profiling instructions, see the [Nsight Profiler Guide](https://git
 | `RLINF_FORCE_ACCEL_CCL` | Force NCCL for weight sync | Set `1` if GPU model names differ across nodes |
 | `RLINF_DISABLE_ACCEL_CCL` | Disable NCCL/accelerator CCL for scheduler collectives | Set `1` only for GLOO baseline; NCCL configs pin this to `0` |
 
-For a pure GLOO baseline, set `cluster.force_gloo: true` in the config or pass `cluster.force_gloo=true` to `run_async.sh`. This disables accelerator CCL backends for scheduler collectives even on homogeneous GPU nodes.
+For a pure GLOO baseline, set `cluster.force_gloo: true` in the config or pass `cluster.force_gloo=true` to `run_async.sh`. This disables accelerator CCL backends for scheduler collectives even on homogeneous GPU nodes. For the 1-rank FSDP/no_shard benchmark, it also initializes the actor's default torch distributed process group with GLOO and skips the CUDA DeviceMesh path that would otherwise create an NCCL process group.
 The provided GLOO/NCCL benchmark configs pin these switches explicitly, so switching between them does not require manually unsetting `RLINF_FORCE_ACCEL_CCL` or `RLINF_DISABLE_ACCEL_CCL`.
 
 **Important**: The `node1_cpu` group (Env worker) also needs `GLOO_SOCKET_IFNAME`.

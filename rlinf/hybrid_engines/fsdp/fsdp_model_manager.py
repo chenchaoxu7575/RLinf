@@ -74,22 +74,29 @@ class FSDPModelManager:
         if cfg.get("tokenizer", {}).get("tokenizer_model", None) is not None:
             self.tokenizer = hf_tokenizer(cfg.tokenizer.tokenizer_model)
 
+        Worker.torch_platform.set_device(int(os.environ["LOCAL_RANK"]))
+        self.device = Worker.torch_platform.current_device()
+
         self._device_mesh = create_device_mesh(
             world_size, self._cfg.fsdp_config.get("fsdp_size", -1)
         )
         self._dp_group = (
             self._device_mesh["ddp"].get_group()
-            if "ddp" in self._device_mesh.mesh_dim_names
+            if self._device_mesh is not None
+            and "ddp" in self._device_mesh.mesh_dim_names
             else None
         )
+        if torch.distributed.is_initialized():
+            self._logger.info(
+                f"[TorchDistributed] backend={torch.distributed.get_backend()} "
+                f"world_size={torch.distributed.get_world_size()} "
+                f"disable_accel_ccl={os.environ.get('RLINF_DISABLE_ACCEL_CCL', '0') == '1'}"
+            )
 
         self._strategy = FSDPStrategyBase.create(
             self._cfg, world_size, self._dp_group, self._logger
         )
         self.amp_context = self._create_amp_context()
-
-        Worker.torch_platform.set_device(int(os.environ["LOCAL_RANK"]))
-        self.device = Worker.torch_platform.current_device()
 
         self.is_weight_offloaded = False
         self.is_optimizer_offloaded = False
