@@ -101,9 +101,33 @@ class MultiChannelProcessGroup:
         self._accel_type = accel_type
 
         _backend_str = self._accel_ccl_backend or "GLOO-only"
+        nccl_env_log = ""
+        if _backend_str.lower() == "nccl":
+            nccl_net = os.environ.get("NCCL_NET", "AUTO")
+            nccl_ib_disable = os.environ.get("NCCL_IB_DISABLE", "0")
+            nccl_socket_ifname = os.environ.get("NCCL_SOCKET_IFNAME", "")
+            nccl_ib_hca = os.environ.get("NCCL_IB_HCA", "")
+            nccl_gdr_level = os.environ.get("NCCL_NET_GDR_LEVEL", "")
+
+            nccl_net_lower = nccl_net.lower()
+            if nccl_ib_disable == "1" or nccl_net_lower == "socket":
+                nccl_path = "LOW_SPEED_SOCKET"
+            elif nccl_net_lower == "ib":
+                nccl_path = "HIGH_SPEED_IB_GDR" if nccl_gdr_level else "HIGH_SPEED_IB"
+            else:
+                nccl_path = "AUTO_CHECK_NCCL_DEBUG"
+
+            nccl_env_log = (
+                f" nccl_path={nccl_path}"
+                f" nccl_net={nccl_net}"
+                f" nccl_ib_disable={nccl_ib_disable}"
+                f" nccl_socket_ifname={nccl_socket_ifname or 'unset'}"
+                f" nccl_ib_hca={nccl_ib_hca or 'unset'}"
+                f" nccl_gdr_level={nccl_gdr_level or 'unset'}"
+            )
         self._logger.info(
             f"[CommBackend] group={group_info.group_name} backend={_backend_str} "
-            f"hetero={hetero_models} force_ccl={force_ccl}"
+            f"hetero={hetero_models} force_ccl={force_ccl}{nccl_env_log}"
         )
 
         self._send_accel_ccl_process_groups: list[dist.ProcessGroup] = [

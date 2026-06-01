@@ -170,6 +170,10 @@ NCCL_LOG=$(ls -td /workspace/rlinf_pub/RLinf/logs/*nccl* | head -1)
 echo "=== NCCL/Socket ===" && grep "Step Time" $SOCKET_LOG/run_embodiment.log | tail -3
 echo "=== NCCL ===" && grep "Step Time" $NCCL_LOG/run_embodiment.log | tail -3
 
+# RLinf communication backend and expected NCCL network path
+echo "=== NCCL/Socket comm path ===" && grep "\[CommBackend\].*ActorGroup:0-RolloutGroup:0" $SOCKET_LOG/run_embodiment.log | head -2
+echo "=== NCCL/IB comm path ===" && grep "\[CommBackend\].*ActorGroup:0-RolloutGroup:0" $NCCL_LOG/run_embodiment.log | head -2
+
 # Per-component time breakdown (last 2 epochs)
 for LOG in "$SOCKET_LOG" "$NCCL_LOG"; do
   echo "=== $(basename $LOG) ==="
@@ -256,7 +260,7 @@ For detailed profiling instructions, see the [Nsight Profiler Guide](https://git
 
 **NCCL/Socket baseline still uses IB**:
 - Cause: NCCL selected IB despite the intended slow baseline
-- Check: `NCCL_DEBUG=INFO` should show `NET/Socket`, not `NET/IB`
+- Check: RLinf `[CommBackend]` should show `nccl_path=LOW_SPEED_SOCKET`; `NCCL_DEBUG=INFO` should show `NET/Socket`, not `NET/IB`
 - Fix: Set `NCCL_IB_DISABLE: "1"` and `NCCL_NET: "Socket"` in GPU node groups
 
 **NCCL GDR disabled**:
