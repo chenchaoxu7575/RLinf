@@ -274,9 +274,6 @@ class ClusterConfig:
     node_groups: Optional[list[NodeGroupConfig]] = None
     """List of node group configurations in the cluster."""
 
-    force_gloo: bool = False
-    """Force scheduler collectives to use Gloo by disabling accelerator CCL backends such as NCCL."""
-
     @staticmethod
     def from_dict_cfg(cfg_dict: DictConfig) -> "ClusterConfig":
         """Create a ClusterConfig instance from a dictionary configuration.

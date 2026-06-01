@@ -399,8 +399,6 @@ class Cluster:
                     default_value := Cluster.DEFAULT_SYS_ENV_VAR[env_var]
                 ) is not None and env_var_name not in node.env_vars:
                     node.env_vars[env_var_name] = default_value
-            if self._cluster_cfg is not None and self._cluster_cfg.force_gloo:
-                node.env_vars["RLINF_DISABLE_ACCEL_CCL"] = "1"
 
     @staticmethod
     def get_sys_env_var(
@@ -530,8 +528,6 @@ class Cluster:
             env_vars,
             path_env_merge_mode,
         )
-        if self._cluster_cfg is not None and self._cluster_cfg.force_gloo:
-            merged_env_vars["RLINF_DISABLE_ACCEL_CCL"] = "1"
 
         # Update Python interpreter path
         python_interpreter_path = node.python_interpreter_path

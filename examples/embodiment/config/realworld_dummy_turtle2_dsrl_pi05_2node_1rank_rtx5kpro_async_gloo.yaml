@@ -20,12 +20,11 @@ hydra:
 #   Node 1: rollout + env — GPU0
 #
 # Network:
-#   Update GLOO_SOCKET_IFNAME to match your ethernet interface names
+#   Update GLOO/NCCL_SOCKET_IFNAME to match your ethernet interface names
 # ============================================================
 cluster:
   num_nodes: 2
   distributed_channel: true
-  force_gloo: true
   component_placement:
     actor:
       node_group: node0
@@ -44,6 +43,7 @@ cluster:
           python_interpreter_path: /opt/venv/openpi/bin/python
           env_vars:
             - GLOO_SOCKET_IFNAME: "ens3f0np0"
+            - NCCL_SOCKET_IFNAME: "ens3f0np0"
     - label: node1
       node_ranks: 1-1
       env_configs:
@@ -51,6 +51,7 @@ cluster:
           python_interpreter_path: /opt/venv/openpi/bin/python
           env_vars:
             - GLOO_SOCKET_IFNAME: "eno2np1"
+            - NCCL_SOCKET_IFNAME: "eno2np1"
     - label: node1_cpu
       node_ranks: 1-1
       ignore_hardware: true
