@@ -148,8 +148,7 @@ Both configs use identical model/algorithm settings. The only difference is comm
 |---|---|---|
 | Config | `_2node_1rank_*_gloo` | `_2node_1rank_*_nccl` |
 | `cluster.force_gloo` | `true` | not set |
-| `RLINF_FORCE_ACCEL_CCL` | forced to `0` by `cluster.force_gloo` | `1` |
-| `RLINF_DISABLE_ACCEL_CCL` | forced to `1` by `cluster.force_gloo` | `0` |
+| `RLINF_FORCE_ACCEL_CCL` | not set | `1` |
 | `NCCL_NET_GDR_LEVEL` | not set | `SYS` |
 | `NCCL_IB_HCA` | not set | `mlx5_0` |
 | Weight sync transport | GLOO/TCP over 10GbE | NCCL/IB 400G + GDRDMA |
@@ -237,10 +236,8 @@ For detailed profiling instructions, see the [Nsight Profiler Guide](https://git
 | `NCCL_IB_HCA` | IB HCA for data transfer | `ibstat` — pick HCA closest to GPU0 per `nvidia-smi topo -m` |
 | `NCCL_NET_GDR_LEVEL` | GPU Direct RDMA level | Set `SYS` if GPU not correctly recognized |
 | `RLINF_FORCE_ACCEL_CCL` | Force NCCL for weight sync | Set `1` if GPU model names differ across nodes |
-| `RLINF_DISABLE_ACCEL_CCL` | Disable NCCL/accelerator CCL for scheduler collectives | Set `1` only for GLOO baseline; NCCL configs pin this to `0` |
 
 For a pure GLOO baseline, set `cluster.force_gloo: true` in the config or pass `cluster.force_gloo=true` to `run_async.sh`. This disables accelerator CCL backends for scheduler collectives even on homogeneous GPU nodes.
-The provided GLOO/NCCL benchmark configs pin these switches explicitly, so switching between them does not require manually unsetting `RLINF_FORCE_ACCEL_CCL` or `RLINF_DISABLE_ACCEL_CCL`.
 
 **Important**: The `node1_cpu` group (Env worker) also needs `GLOO_SOCKET_IFNAME`.
 
