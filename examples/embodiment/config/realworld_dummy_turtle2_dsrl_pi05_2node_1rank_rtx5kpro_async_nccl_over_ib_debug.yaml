@@ -1,0 +1,288 @@
+defaults:
+  - env/realworld_button@env.train
+  - env/realworld_button@env.eval
+  - model/pi0_5@actor.model
+  - training_backend/fsdp@actor.fsdp_config
+  - override hydra/job_logging: stdout
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}/config/
+
+# ============================================================
+# 2-Node 1-Rank Async DSRL Pi0.5 — RTX PRO 5000 (NCCL-over-IB + GDR)
+#   Weight sync via NCCL over IB 400Gbps with GPU Direct RDMA.
+#
+#   Node 0: actor — GPU0
+#   Node 1: rollout + env — GPU0
+#
+# Network: IB 400Gbps (opensm required on head)
+#   Update GLOO/NCCL_SOCKET_IFNAME and NCCL_IB_HCA to match your hardware
+# ============================================================
+cluster:
+  num_nodes: 2
+  distributed_channel: true
+  component_placement:
+    actor:
+      node_group: node0
+      placement: 0-0
+    rollout:
+      node_group: node1
+      placement: 0-0
+    env:
+      node_group: node1_cpu
+      placement: 0
+  node_groups:
+    - label: node0
+      node_ranks: 0-0
+      env_configs:
+        - node_ranks: 0-0
+          python_interpreter_path: /opt/venv/openpi/bin/python
+          env_vars:
+            - GLOO_SOCKET_IFNAME: "ens3f0np0"
+            - NCCL_SOCKET_IFNAME: "ens3f0np0"
+            - NCCL_IB_HCA: "mlx5_0"
+            - NCCL_IB_DISABLE: "0"
+            - NCCL_NET: "IB"
+            - NCCL_NET_GDR_LEVEL: "SYS"
+            - NCCL_CUMEM_ENABLE: "0"
+            - TORCH_NCCL_AVOID_RECORD_STREAMS: "1"
+            - NCCL_DEBUG: "INFO"
+            - NCCL_DEBUG_SUBSYS: "INIT,NET"
+            - RLINF_FORCE_ACCEL_CCL: "1"
+    - label: node1
+      node_ranks: 1-1
+      env_configs:
+        - node_ranks: 1-1
+          python_interpreter_path: /opt/venv/openpi/bin/python
+          env_vars:
+            - GLOO_SOCKET_IFNAME: "eno2np1"
+            - NCCL_SOCKET_IFNAME: "eno2np1"
+            - NCCL_IB_HCA: "mlx5_0"
+            - NCCL_IB_DISABLE: "0"
+            - NCCL_NET: "IB"
+            - NCCL_NET_GDR_LEVEL: "SYS"
+            - NCCL_CUMEM_ENABLE: "0"
+            - TORCH_NCCL_AVOID_RECORD_STREAMS: "1"
+            - NCCL_DEBUG: "INFO"
+            - NCCL_DEBUG_SUBSYS: "INIT,NET"
+            - RLINF_FORCE_ACCEL_CCL: "1"
+    - label: node1_cpu
+      node_ranks: 1-1
+      ignore_hardware: true
+      env_configs:
+        - node_ranks: 1-1
+          env_vars:
+            - GLOO_SOCKET_IFNAME: "eno2np1"
+
+runner:
+  task_type: embodied
+  logger:
+    log_path: "../results"
+    project_name: rlinf
+    experiment_name: "turtle2_dsrl_pi05_2node_1rank_rtx5kpro_nccl_over_ib_debug"
+    logger_backends: ["tensorboard"]
+
+  max_epochs: 10
+  max_steps: -1
+
+  only_eval: False
+  val_check_interval: -1
+  save_interval: -1
+  weight_sync_interval: 1
+
+algorithm:
+  normalize_advantages: False
+  kl_penalty: kl
+  group_size: 1
+  reward_coef: 1.0
+
+  rollout_epoch: 1
+  eval_rollout_epoch: 1
+
+  reward_type: chunk_level
+  logprob_type: chunk_level
+  entropy_type: token_level
+
+  update_epoch: 32
+  adv_type: embodied_sac
+  loss_type: embodied_sac
+  loss_agg_func: "token-mean"
+
+  agg_q: mean
+  actor_agg_q: mean
+  backup_entropy: False
+  critic_subsample_size: 0
+  critic_actor_ratio: 1
+
+  bootstrap_type: always
+  gamma: 0.8
+  tau: 0.01
+
+  entropy_tuning:
+    alpha_type: softplus
+    initial_alpha: 0.01
+    target_entropy: -7
+    optim:
+      lr: 3.0e-4
+      lr_scheduler: torch_constant
+      clip_grad: 10.0
+
+  replay_buffer:
+    enable_cache: True
+    cache_size: 200
+    sample_window_size: 200
+    min_buffer_size: 1
+    auto_save: False
+
+  target_update_freq: 1
+  target_update_type: all
+  train_actor_steps: 10
+
+  sampling_params:
+    do_sample: True
+    temperature_train: 1.0
+    temperature_eval: 0.6
+    top_k: 50
+    top_p: 1.0
+    repetition_penalty: 1.0
+
+  length_params:
+    max_new_token: null
+    max_length: 1024
+    min_length: 1
+
+env:
+  group_name: "EnvGroup"
+
+  train:
+    total_num_envs: 1
+    override_cfg:
+      is_dummy: True
+      use_arm_ids: [1]
+      use_camera_ids: [0, 1, 2]
+      target_ee_pose: [[0, 0, 0, 0, 0, 0], [0.0, 0.0, 0.15, 0.0, 1, 0.0]]
+      step_frequency: 30.0
+      image_size: 224
+
+  eval:
+    total_num_envs: 1
+    override_cfg:
+      is_dummy: True
+      use_arm_ids: [1]
+      use_camera_ids: [0, 1, 2]
+      target_ee_pose: [[0, 0, 0, 0, 0, 0], [0.0, 0.0, 0.15, 0.0, 1, 0.0]]
+      step_frequency: 30.0
+      image_size: 224
+
+rollout:
+  group_name: "RolloutGroup"
+  generation_backend: "huggingface"
+  recompute_logprobs: False
+  unnorm_key: turtle
+  enable_offload: False
+  pipeline_stage_num: 1
+
+  collect_transitions: True
+  collect_prev_infos: False
+
+  model:
+    model_path: "/workspace/rlinf_pub/models/RLinf-Pi05-LIBERO-SFT"
+    precision: ${actor.model.precision}
+
+  enable_torch_compile: False
+  enable_cuda_graph: False
+
+actor:
+  group_name: "ActorGroup"
+  training_backend: "fsdp"
+
+  micro_batch_size: 32
+  global_batch_size: 32
+  seed: 42
+  enable_offload: False
+
+  model:
+    model_path: "/workspace/rlinf_pub/models/RLinf-Pi05-LIBERO-SFT"
+    state_dim: 6
+    action_dim: 6
+    num_action_chunks: 50
+    num_steps: 3
+    add_value_head: False
+    add_q_head: True
+    q_head_type: "default"
+
+    openpi:
+      config_name: "pi05_turtle"
+      num_images_in_input: 3
+      action_env_dim: 6
+      action_chunk: ${actor.model.num_action_chunks}
+      num_steps: ${actor.model.num_steps}
+      train_expert_only: True
+      noise_method: "reinflow"
+      add_value_head: ${actor.model.add_value_head}
+      value_after_vlm: False
+      value_vlm_mode: "mean_token"
+      detach_critic_input: True
+
+      use_dsrl: True
+      dsrl_state_dim: 6
+      dsrl_action_noise_dim: 32
+      dsrl_num_q_heads: 10
+      dsrl_image_latent_dim: 64
+      dsrl_state_latent_dim: 64
+      dsrl_hidden_dims: [128, 128, 128]
+
+  optim:
+    lr: 1.0e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.96
+    adam_eps: 1.0e-08
+    clip_grad: 3.5
+
+  critic_optim:
+    lr: 3.0e-4
+    clip_grad: 10.0
+    lr_scheduler: torch_constant
+
+  fsdp_config:
+    strategy: "fsdp"
+    sharding_strategy: "no_shard"
+    use_orig_params: True
+    gradient_checkpointing: False
+    mixed_precision:
+      param_dtype: ${actor.model.precision}
+      reduce_dtype: ${actor.model.precision}
+      buffer_dtype: ${actor.model.precision}
+
+nsight_profiler:
+  steps: [6, 7, 8]
+  discrete: false
+
+  nsight_options:
+    t: "cuda,cudnn,cublas,nvtx,osrt"
+    cuda-memory-usage: "true"
+    capture-range: "cudaProfilerApi"
+    capture-range-end: "repeat-shutdown:10"
+
+  actor:
+    enable: true
+    all_ranks: true
+    ranks: []
+  rollout:
+    enable: true
+    all_ranks: true
+    ranks: []
+  env:
+    enable: true
+    all_ranks: true
+    ranks: []
+
+reward:
+  use_reward_model: False
+
+critic:
+  use_critic_model: False
