@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from contextlib import nullcontext
-from typing import ContextManager, Optional, Union
+from typing import ContextManager, Union
 
 import torch
 import torch.nn as nn
@@ -38,9 +38,7 @@ from rlinf.utils.utils import clear_memory
 
 
 class FSDP2Strategy(FSDPStrategyBase):
-    def wrap_model(
-        self, model: nn.Module, device_mesh: Optional[DeviceMesh]
-    ) -> FSDPModule:
+    def wrap_model(self, model: nn.Module, device_mesh: DeviceMesh) -> FSDPModule:
         """
         Wrap the model with FSDP2's fully_shard.
 
@@ -51,12 +49,6 @@ class FSDP2Strategy(FSDPStrategyBase):
         Returns:
             - FSDPModule: The FSDP2 wrapped model.
         """
-        if device_mesh is None:
-            raise RuntimeError(
-                "FSDP2 requires an accelerator DeviceMesh. Use FSDP strategy with "
-                "single-rank no_shard for cluster.force_gloo=true runs."
-            )
-
         mixed_precision_config = self.cfg.fsdp_config.mixed_precision
         param_dtype = torch_dtype_from_precision(mixed_precision_config.param_dtype)
         reduce_dtype = torch_dtype_from_precision(mixed_precision_config.reduce_dtype)

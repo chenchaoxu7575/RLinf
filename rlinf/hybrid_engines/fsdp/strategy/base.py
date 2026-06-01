@@ -131,7 +131,7 @@ class FSDPStrategyBase(ABC):
 
     @abstractmethod
     def wrap_model(
-        self, model: nn.Module, device_mesh: Optional[DeviceMesh]
+        self, model: nn.Module, device_mesh: DeviceMesh
     ) -> Union[FSDP, FSDPModule]:
         """
         Wrap the model with FSDP or FSDPModule based on the strategy.

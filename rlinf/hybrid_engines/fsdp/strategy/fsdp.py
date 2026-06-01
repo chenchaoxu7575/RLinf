@@ -14,7 +14,7 @@
 
 import os
 from contextlib import nullcontext
-from typing import ContextManager, Optional, Union
+from typing import ContextManager, Union
 
 import torch
 import torch.nn as nn
@@ -41,7 +41,7 @@ from rlinf.utils.utils import clear_memory
 
 
 class FSDPStrategy(FSDPStrategyBase):
-    def wrap_model(self, model: nn.Module, device_mesh: Optional[DeviceMesh]) -> FSDP:
+    def wrap_model(self, model: nn.Module, device_mesh: DeviceMesh) -> FSDP:
         """
         Wrap the model with FSDP using the specified configuration,
         it will apply mixed precision, sharding strategy, and wrapping policy.
@@ -78,25 +78,22 @@ class FSDPStrategy(FSDPStrategyBase):
             self.cfg.fsdp_config.backward_prefetch
         )
 
-        sync_states = device_mesh is not None and device_mesh.size() > 1
+        sync_states = device_mesh.size() > 1
 
-        fsdp_kwargs = {
-            "module": model,
-            "param_init_fn": init_fn,
-            "auto_wrap_policy": auto_wrap_policy,
-            "device_id": int(os.environ["LOCAL_RANK"]),
-            "sharding_strategy": sharding_strategy,
-            "mixed_precision": mixed_precision,
-            "sync_module_states": sync_states,
-            "forward_prefetch": self.cfg.fsdp_config.forward_prefetch,
-            "backward_prefetch": backward_prefetch,
-            "limit_all_gathers": self.cfg.fsdp_config.limit_all_gathers,
-            "use_orig_params": self.cfg.fsdp_config.use_orig_params,
-        }
-        if device_mesh is not None:
-            fsdp_kwargs["device_mesh"] = device_mesh
-
-        fsdp_model = FSDP(**fsdp_kwargs)
+        fsdp_model = FSDP(
+            module=model,
+            param_init_fn=init_fn,
+            auto_wrap_policy=auto_wrap_policy,
+            device_id=int(os.environ["LOCAL_RANK"]),
+            sharding_strategy=sharding_strategy,
+            mixed_precision=mixed_precision,
+            sync_module_states=sync_states,
+            device_mesh=device_mesh,
+            forward_prefetch=self.cfg.fsdp_config.forward_prefetch,
+            backward_prefetch=backward_prefetch,
+            limit_all_gathers=self.cfg.fsdp_config.limit_all_gathers,
+            use_orig_params=self.cfg.fsdp_config.use_orig_params,
+        )
         return fsdp_model
 
     @classmethod
