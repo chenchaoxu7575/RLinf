@@ -13,14 +13,15 @@ hydra:
     - file://${oc.env:EMBODIED_PATH}/config/
 
 # ============================================================
-# 2-Node 1-Rank Async DSRL Pi0.5 — RTX PRO 5000 (GLOO baseline)
-#   Weight sync via GLOO/TCP (no NCCL). Slow baseline for comparison.
+# 2-Node 1-Rank Async DSRL Pi0.5 — RTX PRO 5000 (NCCL/Socket baseline)
+#   Weight sync still uses NCCL, but NCCL is forced onto TCP sockets
+#   instead of IB/GDR. Slow baseline for comparison.
 #
 #   Node 0: actor — GPU0
 #   Node 1: rollout + env — GPU0
 #
 # Network:
-#   Update GLOO/NCCL_SOCKET_IFNAME to match your ethernet interface names
+#   Update GLOO/NCCL_SOCKET_IFNAME to match your low-speed ethernet interface names
 # ============================================================
 cluster:
   num_nodes: 2
@@ -44,6 +45,9 @@ cluster:
           env_vars:
             - GLOO_SOCKET_IFNAME: "ens3f0np0"
             - NCCL_SOCKET_IFNAME: "ens3f0np0"
+            - NCCL_IB_DISABLE: "1"
+            - NCCL_NET: "Socket"
+            - RLINF_FORCE_ACCEL_CCL: "1"
     - label: node1
       node_ranks: 1-1
       env_configs:
@@ -52,6 +56,9 @@ cluster:
           env_vars:
             - GLOO_SOCKET_IFNAME: "eno2np1"
             - NCCL_SOCKET_IFNAME: "eno2np1"
+            - NCCL_IB_DISABLE: "1"
+            - NCCL_NET: "Socket"
+            - RLINF_FORCE_ACCEL_CCL: "1"
     - label: node1_cpu
       node_ranks: 1-1
       ignore_hardware: true
@@ -65,7 +72,7 @@ runner:
   logger:
     log_path: "../results"
     project_name: rlinf
-    experiment_name: "turtle2_dsrl_pi05_2node_1rank_rtx5kpro_gloo"
+    experiment_name: "turtle2_dsrl_pi05_2node_1rank_rtx5kpro_nccl_socket"
     logger_backends: ["tensorboard"]
 
   max_epochs: 10
