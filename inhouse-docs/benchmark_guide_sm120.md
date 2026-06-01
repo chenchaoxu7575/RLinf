@@ -148,8 +148,8 @@ Both configs use identical model/algorithm settings. The high-level backend is N
 |---|---|---|
 | Config | `_2node_1rank_*_gloo` | `_2node_1rank_*_nccl` |
 | `RLINF_FORCE_ACCEL_CCL` | `1` | `1` |
-| `NCCL_IB_DISABLE` | `1` | not set |
-| `NCCL_NET` | `Socket` | not set |
+| `NCCL_IB_DISABLE` | `1` | `0` |
+| `NCCL_NET` | `Socket` | `IB` |
 | `NCCL_NET_GDR_LEVEL` | not set | `SYS` |
 | `NCCL_IB_HCA` | not set | `mlx5_0` |
 | Weight sync transport | NCCL over TCP sockets/10GbE | NCCL/IB 400G + GDRDMA |
