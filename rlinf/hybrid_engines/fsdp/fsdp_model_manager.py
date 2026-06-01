@@ -74,6 +74,9 @@ class FSDPModelManager:
         if cfg.get("tokenizer", {}).get("tokenizer_model", None) is not None:
             self.tokenizer = hf_tokenizer(cfg.tokenizer.tokenizer_model)
 
+        Worker.torch_platform.set_device(int(os.environ["LOCAL_RANK"]))
+        self.device = Worker.torch_platform.current_device()
+
         self._device_mesh = create_device_mesh(
             world_size, self._cfg.fsdp_config.get("fsdp_size", -1)
         )
@@ -87,9 +90,6 @@ class FSDPModelManager:
             self._cfg, world_size, self._dp_group, self._logger
         )
         self.amp_context = self._create_amp_context()
-
-        Worker.torch_platform.set_device(int(os.environ["LOCAL_RANK"]))
-        self.device = Worker.torch_platform.current_device()
 
         self.is_weight_offloaded = False
         self.is_optimizer_offloaded = False
