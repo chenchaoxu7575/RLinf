@@ -13,7 +13,7 @@ hydra:
     - file://${oc.env:EMBODIED_PATH}/config/
 
 # ============================================================
-# 2-Node 1-Rank Async DSRL Pi0.5 — RTX PRO 5000 (NCCL/IB + GDR)
+# 2-Node 1-Rank Async DSRL Pi0.5 — RTX PRO 5000 (NCCL-over-IB + GDR)
 #   Weight sync via NCCL over IB 400Gbps with GPU Direct RDMA.
 #
 #   Node 0: actor — GPU0
@@ -75,7 +75,7 @@ runner:
   logger:
     log_path: "../results"
     project_name: rlinf
-    experiment_name: "turtle2_dsrl_pi05_2node_1rank_rtx5kpro_nccl"
+    experiment_name: "turtle2_dsrl_pi05_2node_1rank_rtx5kpro_nccl_over_ib"
     logger_backends: ["tensorboard"]
 
   max_epochs: 10

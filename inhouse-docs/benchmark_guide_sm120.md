@@ -128,25 +128,27 @@ Verify: `ray status` shows 2 nodes.
 
 Run experiments from the **head node** (Node 0) container. Ray will automatically dispatch workers to both nodes.
 
-### A/B Comparison: NCCL/Socket vs NCCL/IB Weight Sync
+### A/B Comparison: NCCL-over-Socket vs NCCL-over-IB Weight Sync
 
-**Experiment A — NCCL/Socket baseline** (weight sync still uses NCCL, but NCCL is forced onto TCP/10GbE):
+**Experiment A — NCCL-over-Socket baseline** (weight sync still uses NCCL, but NCCL is forced onto TCP/10GbE):
 ```bash
 cd /workspace/rlinf_pub/RLinf
-bash examples/embodiment/run_async.sh realworld_dummy_turtle2_dsrl_pi05_2node_1rank_rtx5kpro_async_gloo
+bash examples/embodiment/run_async.sh realworld_dummy_turtle2_dsrl_pi05_2node_1rank_rtx5kpro_async_nccl_over_socket
 ```
 
-**Experiment B — NCCL/IB optimized** (weight sync via NCCL/IB 400G + GDR):
+**Experiment B — NCCL-over-IB optimized** (weight sync via NCCL/IB 400G + GDR):
 ```bash
 cd /workspace/rlinf_pub/RLinf
-bash examples/embodiment/run_async.sh realworld_dummy_turtle2_dsrl_pi05_2node_1rank_rtx5kpro_async_nccl
+bash examples/embodiment/run_async.sh realworld_dummy_turtle2_dsrl_pi05_2node_1rank_rtx5kpro_async_nccl_over_ib
 ```
 
 Both configs use identical model/algorithm settings. The high-level backend is NCCL in both runs; the difference is the NCCL network layer:
 
-| | NCCL/Socket (Exp A) | NCCL/IB+GDR (Exp B) |
+This A/B does **not** measure GLOO fallback. In the socket run, NCCL still launches NCCL kernels and internally stages traffic through the socket network path. A true GLOO fallback run should show `pg/D2H_copy`, `pg/send backend=GLOO(D2H_fallback)`, and no weight-sync NCCL broadcast kernel.
+
+| | NCCL-over-Socket (Exp A) | NCCL-over-IB+GDR (Exp B) |
 |---|---|---|
-| Config | `_2node_1rank_*_gloo` | `_2node_1rank_*_nccl` |
+| Config | `_2node_1rank_*_nccl_over_socket` | `_2node_1rank_*_nccl_over_ib` |
 | `RLINF_FORCE_ACCEL_CCL` | `1` | `1` |
 | `NCCL_IB_DISABLE` | `1` | `0` |
 | `NCCL_NET` | `Socket` | `IB` |
@@ -163,19 +165,19 @@ After both experiments complete, run on head node (inside container):
 
 ```bash
 # Set log dirs (auto-detect latest runs)
-SOCKET_LOG=$(ls -td /workspace/rlinf_pub/RLinf/logs/*gloo* | head -1)
-NCCL_LOG=$(ls -td /workspace/rlinf_pub/RLinf/logs/*nccl* | head -1)
+SOCKET_LOG=$(ls -td /workspace/rlinf_pub/RLinf/logs/*nccl_over_socket* | head -1)
+IB_LOG=$(ls -td /workspace/rlinf_pub/RLinf/logs/*nccl_over_ib* | head -1)
 
 # Step time comparison (last 3 steps)
-echo "=== NCCL/Socket ===" && grep "Step Time" $SOCKET_LOG/run_embodiment.log | tail -3
-echo "=== NCCL ===" && grep "Step Time" $NCCL_LOG/run_embodiment.log | tail -3
+echo "=== NCCL-over-Socket ===" && grep "Step Time" $SOCKET_LOG/run_embodiment.log | tail -3
+echo "=== NCCL-over-IB ===" && grep "Step Time" $IB_LOG/run_embodiment.log | tail -3
 
 # RLinf communication backend and expected NCCL network path
-echo "=== NCCL/Socket comm path ===" && grep "\[CommBackend\].*ActorGroup:0-RolloutGroup:0" $SOCKET_LOG/run_embodiment.log | head -2
-echo "=== NCCL/IB comm path ===" && grep "\[CommBackend\].*ActorGroup:0-RolloutGroup:0" $NCCL_LOG/run_embodiment.log | head -2
+echo "=== NCCL-over-Socket comm path ===" && grep "\[CommBackend\].*ActorGroup:0-RolloutGroup:0" $SOCKET_LOG/run_embodiment.log | head -2
+echo "=== NCCL-over-IB comm path ===" && grep "\[CommBackend\].*ActorGroup:0-RolloutGroup:0" $IB_LOG/run_embodiment.log | head -2
 
 # Per-component time breakdown (last 2 epochs)
-for LOG in "$SOCKET_LOG" "$NCCL_LOG"; do
+for LOG in "$SOCKET_LOG" "$IB_LOG"; do
   echo "=== $(basename $LOG) ==="
   grep -oP '(actor/run_training|rollout/generate_one_epoch|env/env_interact_step|step)=[0-9.]+' \
     $LOG/run_embodiment.log | tail -8
@@ -206,18 +208,18 @@ Example output:
       0.0          4785813          3      1595271.0      1373094.0      1339283      2073436  :collective/send_tensor_list/metadata n_tensors=1001
 ```
 
-Key metrics: `actor/sync_model_to_rollout` Avg shows end-to-end weight sync time (~173ms median for NCCL/IB).
+Key metrics: `actor/sync_model_to_rollout` Avg shows end-to-end weight sync time. Use the `pg/send backend=...` ranges and NCCL kernel report to distinguish NCCL-over-Socket from NCCL-over-IB/GDR.
 
-Or open `.nsys-rep` in Nsight Systems GUI — look for `actor/sync_model_to_rollout` NVTX range. In both benchmark configs the scheduler weight-sync backend should be NCCL; use `NCCL_DEBUG=INFO` to distinguish `NET/Socket` from `NET/IB`.
+Or open `.nsys-rep` in Nsight Systems GUI — look for `actor/sync_model_to_rollout` NVTX range. In both benchmark configs the scheduler weight-sync backend should be NCCL; use `NCCL_DEBUG=INFO` and the RLinf `[CommBackend]` log to distinguish `NET/Socket` from `NET/IB`.
 
 For detailed profiling instructions, see the [Nsight Profiler Guide](https://github.com/chenchaoxu7575/RLinf/blob/feat/nsight-profiler-integration/docs/source-en/rst_source/tutorials/advance/nsight_profiler_guide.rst).
 
 ### Expected Results
 
-| Metric | NCCL/Socket (Exp A) | NCCL/IB+GDR (Exp B) |
+| Metric | NCCL-over-Socket (Exp A) | NCCL-over-IB+GDR (Exp B) |
 |--------|-------------|-------------|
 | Weight sync (8.5GB state_dict) | seconds, bounded by TCP | ~242ms |
-| NCCL timeline activity | Active over socket transport | Active (GDRDMA kernels) |
+| NCCL timeline activity | Active over socket transport | Active over IB/GDR |
 | NCCL network | `Socket` | `IB` |
 | Step time | ~37s | ~26s |
 
@@ -240,8 +242,8 @@ For detailed profiling instructions, see the [Nsight Profiler Guide](https://git
 | `NCCL_SOCKET_IFNAME` | Ethernet for NCCL bootstrap | Same as above |
 | `NCCL_IB_HCA` | IB HCA for data transfer | `ibstat` — pick HCA closest to GPU0 per `nvidia-smi topo -m` |
 | `NCCL_NET_GDR_LEVEL` | GPU Direct RDMA level | Set `SYS` if GPU not correctly recognized |
-| `NCCL_IB_DISABLE` | Disable IB/RoCE in NCCL | Set `1` for the NCCL/Socket baseline |
-| `NCCL_NET` | Force NCCL network module | Set `Socket` for the NCCL/Socket baseline |
+| `NCCL_IB_DISABLE` | Disable IB/RoCE in NCCL | Set `1` for the NCCL-over-Socket baseline |
+| `NCCL_NET` | Force NCCL network module | Set `Socket` for the NCCL-over-Socket baseline |
 | `RLINF_FORCE_ACCEL_CCL` | Force NCCL for weight sync | Set `1` if GPU model names differ across nodes |
 
 **Important**: The `node1_cpu` group (Env worker) also needs `GLOO_SOCKET_IFNAME`.
@@ -258,7 +260,7 @@ For detailed profiling instructions, see the [Nsight Profiler Guide](https://git
 - Check: `nvidia-smi -L` on both nodes, or look for `hetero_models=True` in logs
 - Fix: Set `RLINF_FORCE_ACCEL_CCL: "1"` in GPU node groups
 
-**NCCL/Socket baseline still uses IB**:
+**NCCL-over-Socket baseline still uses IB**:
 - Cause: NCCL selected IB despite the intended slow baseline
 - Check: RLinf `[CommBackend]` should show `nccl_path=LOW_SPEED_SOCKET`; `NCCL_DEBUG=INFO` should show `NET/Socket`, not `NET/IB`
 - Fix: Set `NCCL_IB_DISABLE: "1"` and `NCCL_NET: "Socket"` in GPU node groups

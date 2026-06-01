@@ -13,9 +13,10 @@ hydra:
     - file://${oc.env:EMBODIED_PATH}/config/
 
 # ============================================================
-# 2-Node 1-Rank Async DSRL Pi0.5 — RTX PRO 5000 (NCCL/Socket baseline)
+# 2-Node 1-Rank Async DSRL Pi0.5 — RTX PRO 5000 (NCCL-over-Socket baseline)
 #   Weight sync still uses NCCL, but NCCL is forced onto TCP sockets
-#   instead of IB/GDR. Slow baseline for comparison.
+#   instead of IB/GDR. This simulates machines without a high-speed
+#   IB/GDR data path, but it is not a GLOO fallback run.
 #
 #   Node 0: actor — GPU0
 #   Node 1: rollout + env — GPU0
@@ -72,7 +73,7 @@ runner:
   logger:
     log_path: "../results"
     project_name: rlinf
-    experiment_name: "turtle2_dsrl_pi05_2node_1rank_rtx5kpro_nccl_socket"
+    experiment_name: "turtle2_dsrl_pi05_2node_1rank_rtx5kpro_nccl_over_socket"
     logger_backends: ["tensorboard"]
 
   max_epochs: 10
