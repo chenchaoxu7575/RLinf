@@ -46,7 +46,8 @@ cluster:
             - NCCL_SOCKET_IFNAME: "ens3f0np0"
             - NCCL_IB_HCA: "mlx5_0"
             - NCCL_IB_DISABLE: "0"
-            - NCCL_NET: "IB"
+            # Leave NCCL_NET unset so NCCL can auto-select the RDMA plugin
+            # provider (for example IBext_v11), matching the historical v3 run.
             - NCCL_NET_GDR_LEVEL: "SYS"
             - RLINF_FORCE_ACCEL_CCL: "1"
     - label: node1
@@ -59,7 +60,8 @@ cluster:
             - NCCL_SOCKET_IFNAME: "eno2np1"
             - NCCL_IB_HCA: "mlx5_0"
             - NCCL_IB_DISABLE: "0"
-            - NCCL_NET: "IB"
+            # Leave NCCL_NET unset so NCCL can auto-select the RDMA plugin
+            # provider (for example IBext_v11), matching the historical v3 run.
             - NCCL_NET_GDR_LEVEL: "SYS"
             - RLINF_FORCE_ACCEL_CCL: "1"
     - label: node1_cpu

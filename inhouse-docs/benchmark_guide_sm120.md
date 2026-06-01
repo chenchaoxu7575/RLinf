@@ -151,7 +151,7 @@ This A/B does **not** measure GLOO fallback. In the socket run, NCCL still launc
 | Config | `_2node_1rank_*_nccl_over_socket` | `_2node_1rank_*_nccl_over_ib` |
 | `RLINF_FORCE_ACCEL_CCL` | `1` | `1` |
 | `NCCL_IB_DISABLE` | `1` | `0` |
-| `NCCL_NET` | `Socket` | `IB` |
+| `NCCL_NET` | `Socket` | unset; let NCCL auto-select the RDMA plugin |
 | `NCCL_NET_GDR_LEVEL` | not set | `SYS` |
 | `NCCL_IB_HCA` | not set | `mlx5_0` |
 | Weight sync transport | NCCL over TCP sockets/10GbE | NCCL/IB 400G + GDRDMA |
@@ -243,7 +243,7 @@ For detailed profiling instructions, see the [Nsight Profiler Guide](https://git
 | `NCCL_IB_HCA` | IB HCA for data transfer | `ibstat` — pick HCA closest to GPU0 per `nvidia-smi topo -m` |
 | `NCCL_NET_GDR_LEVEL` | GPU Direct RDMA level | Set `SYS` if GPU not correctly recognized |
 | `NCCL_IB_DISABLE` | Disable IB/RoCE in NCCL | Set `1` for the NCCL-over-Socket baseline |
-| `NCCL_NET` | Force NCCL network module | Set `Socket` for the NCCL-over-Socket baseline |
+| `NCCL_NET` | Force NCCL network module | Set `Socket` only for the NCCL-over-Socket baseline; leave unset for NCCL-over-IB so NCCL can auto-select the RDMA plugin such as `IBext_v11` |
 | `RLINF_FORCE_ACCEL_CCL` | Force NCCL for weight sync | Set `1` if GPU model names differ across nodes |
 
 **Important**: The `node1_cpu` group (Env worker) also needs `GLOO_SOCKET_IFNAME`.
