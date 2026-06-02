@@ -32,9 +32,8 @@ from rlinf.algorithms.utils import (
 from rlinf.config import SupportedModel, torch_dtype_from_precision
 from rlinf.data.embodied_io_struct import Trajectory, convert_trajectories_to_batch
 from rlinf.data.io_struct import BatchResizingIterator, RolloutResult
-from rlinf.hybrid_engines.fsdp.fsdp_model_manager import (
-    FSDPModelManager,
-)
+from rlinf.data.lerobot_paths import resolve_lerobot_repo_id
+from rlinf.hybrid_engines.fsdp.fsdp_model_manager import FSDPModelManager
 from rlinf.hybrid_engines.fsdp.utils import (
     pack_fsdp_input,
     prepare_pack_fsdp,
@@ -999,7 +998,6 @@ class FSDPActor(FSDPModelManager, Worker):
                     ),
                 )
                 batch["advantages"] = advantages
-
         return batch
 
 
@@ -1014,7 +1012,6 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
 
         # stage_num: default to 2, use for pipeline rollout process
         self.stage_num = cfg.rollout.pipeline_stage_num
-
         self.enable_offload = self.cfg.actor.get("enable_offload", False)
         self.entropy_op_type = self.cfg.algorithm.get("entropy_op_type", "torch")
 
@@ -1090,28 +1087,12 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             ).async_wait()
 
         async def recv_func():
-            if self._is_weight_sender:
-                metadata = await self.recv(
-                    src_group_name=self._rollout_group_name,
-                    src_rank=0,
-                    async_op=True,
-                    options=self._sync_weight_comm_options,
-                ).async_wait()
-            else:
-                metadata = None
-            if self._actor_world_size > 1:
-                metadata = await self.broadcast(
-                    metadata,
-                    groups=[
-                        (
-                            self._group_name,
-                            list(range(self._actor_world_size)),
-                        )
-                    ],
-                    src=(self._group_name, 0),
-                    async_op=True,
-                ).async_wait()
-            return metadata
+            return await self.recv(
+                src_group_name=self._rollout_group_name,
+                src_rank=0,
+                async_op=True,
+                options=self._sync_weight_comm_options,
+            ).async_wait()
 
         if not self.weight_syncer.sender_initialized():
             await self.weight_syncer.init_sender(
@@ -1261,9 +1242,12 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
 
     def _build_sft_data_loader(self):
         if SupportedModel(self.cfg.actor.model.model_type) in [SupportedModel.OPENPI]:
-            # NOTE: This must be set before importing openpi.training.data_loader
-            if self.cfg.actor.get("sft_data_path", None):
-                os.environ["HF_LEROBOT_HOME"] = self.cfg.actor.sft_data_path
+            repo_id = resolve_lerobot_repo_id(self.cfg.actor.get("sft_data_path"))
+            if repo_id is None:
+                raise ValueError(
+                    "actor.sft_data_path must be set to a local dataset path or "
+                    "LeRobot repo id when enable_sft_co_train=True."
+                )
 
             import openpi.training.data_loader as _data
 
@@ -1277,6 +1261,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             data_loader_config = get_openpi_config(
                 training_config_name,
                 model_path=self.cfg.actor.model.model_path,
+                repo_id=repo_id,
                 data_kwargs=getattr(self.cfg.actor, "openpi_data", None),
             )
             self.data_loader = _data.create_data_loader(
@@ -1425,10 +1410,10 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                             self.cfg.algorithm.sampling_params.temperature_train
                         )
                         kwargs["top_k"] = self.cfg.algorithm.sampling_params.top_k
-                    elif (
-                        SupportedModel(self.cfg.actor.model.model_type)
-                        == SupportedModel.GR00T
-                    ):
+                    elif SupportedModel(self.cfg.actor.model.model_type) in [
+                        SupportedModel.GR00T,
+                        SupportedModel.ABOT_M0,
+                    ]:
                         kwargs["prev_logprobs"] = prev_logprobs
 
                     compute_values = (
@@ -1445,10 +1430,10 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                             **kwargs,
                         )
 
-                    if (
-                        SupportedModel(self.cfg.actor.model.model_type)
-                        == SupportedModel.GR00T
-                    ):
+                    if SupportedModel(self.cfg.actor.model.model_type) in [
+                        SupportedModel.GR00T,
+                        SupportedModel.ABOT_M0,
+                    ]:
                         prev_logprobs = output_dict["prev_logprobs"]
 
                     kwargs = {
