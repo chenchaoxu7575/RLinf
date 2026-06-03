@@ -13,7 +13,9 @@
 # limitations under the License.
 
 import bisect
+import contextlib
 import json
+import os
 import random
 from collections import OrderedDict
 from pathlib import Path
@@ -51,6 +53,46 @@ from rlinf.data.lerobot_paths import resolve_lerobot_dataset_root
 from rlinf.utils.logging import get_logger
 
 logger = get_logger()
+
+
+def _dreamzero_profile_enabled() -> bool:
+    return os.environ.get("RLINF_DREAMZERO_VIDEOLOADER_PROFILE", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _dreamzero_skip_video_decode() -> bool:
+    return os.environ.get("RLINF_DREAMZERO_VIDEOLOADER_SKIP_DECODE", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _dreamzero_profile_name(*parts: Any) -> str:
+    clean_parts = []
+    for part in parts:
+        text = str(part).strip()
+        text = text.replace("/", "_").replace(" ", "_")
+        text = text.replace(":", "_").replace(",", "_")
+        clean_parts.append(text)
+    return ".".join(part for part in clean_parts if part)
+
+
+@contextlib.contextmanager
+def _dreamzero_profile_range(name: str):
+    with torch.profiler.record_function(name):
+        try:
+            import nvtx
+        except Exception:
+            yield
+        else:
+            with nvtx.annotate(name):
+                yield
 
 
 class DreamZeroLeRobotDataset(Dataset):
@@ -547,10 +589,19 @@ class DreamZeroLeRobotDataset(Dataset):
     def _decode_fps_for_video_file(self, video_path: Path) -> float:
         key = str(video_path.resolve())
         if key in self._video_decode_fps_cache:
+            if _dreamzero_profile_enabled():
+                with _dreamzero_profile_range("dreamzero.video.fps_cache_hit"):
+                    fps = self._video_decode_fps_cache.pop(key)
+                    self._video_decode_fps_cache[key] = fps
+                    return fps
             fps = self._video_decode_fps_cache.pop(key)
             self._video_decode_fps_cache[key] = fps
             return fps
-        fps = float(probe_video_container_fps(video_path) or self._fps)
+        if _dreamzero_profile_enabled():
+            with _dreamzero_profile_range("dreamzero.video.fps_probe"):
+                fps = float(probe_video_container_fps(video_path) or self._fps)
+        else:
+            fps = float(probe_video_container_fps(video_path) or self._fps)
         self._video_decode_fps_cache[key] = fps
         if len(self._video_decode_fps_cache) > self._video_decode_fps_cache_max:
             self._video_decode_fps_cache.popitem(last=False)
@@ -559,13 +610,22 @@ class DreamZeroLeRobotDataset(Dataset):
     def _get_episode_table(self, episode_index: int):
         episode_index = int(episode_index)
         if episode_index in self._pq_cache:
+            if _dreamzero_profile_enabled():
+                with _dreamzero_profile_range("dreamzero.parquet.cache_hit"):
+                    tbl = self._pq_cache.pop(episode_index)
+                    self._pq_cache[episode_index] = tbl
+                    return tbl
             tbl = self._pq_cache.pop(episode_index)
             self._pq_cache[episode_index] = tbl
             return tbl
         import pyarrow.parquet as pq
 
         p = self._get_parquet_path(episode_index)
-        schema = set(pq.read_schema(str(p)).names)
+        if _dreamzero_profile_enabled():
+            with _dreamzero_profile_range("dreamzero.parquet.read_schema"):
+                schema = set(pq.read_schema(str(p)).names)
+        else:
+            schema = set(pq.read_schema(str(p)).names)
         cols = [
             c
             for c in (
@@ -577,7 +637,11 @@ class DreamZeroLeRobotDataset(Dataset):
             )
             if c in schema
         ]
-        tbl = pq.read_table(str(p), columns=list(dict.fromkeys(cols)))
+        if _dreamzero_profile_enabled():
+            with _dreamzero_profile_range("dreamzero.parquet.read_table"):
+                tbl = pq.read_table(str(p), columns=list(dict.fromkeys(cols)))
+        else:
+            tbl = pq.read_table(str(p), columns=list(dict.fromkeys(cols)))
         self._pq_cache[episode_index] = tbl
         if len(self._pq_cache) > self._pq_cache_max_episodes:
             self._pq_cache.popitem(last=False)
@@ -615,6 +679,30 @@ class DreamZeroLeRobotDataset(Dataset):
             else:
                 arr = np.clip(arr_f, 0, 255).astype(np.uint8)
         return arr
+
+    def _empty_video_frames(self, source_key: str, frame_count: int) -> np.ndarray:
+        feature = self._features.get(source_key) or {}
+        shape = list(feature.get("shape") or [])
+        if len(shape) != 3:
+            raise ValueError(
+                f"Cannot synthesize empty video frames for {source_key!r}; "
+                f"expected feature shape [H, W, C], got {shape!r}"
+            )
+        h, w, c = (int(v) for v in shape)
+        return np.zeros((int(frame_count), h, w, c), dtype=np.uint8)
+
+    @staticmethod
+    def _decode_video_frames_decord(video_path: Path, frame_indices: np.ndarray) -> np.ndarray:
+        from decord import VideoReader, cpu
+
+        indices = [int(i) for i in frame_indices.tolist()]
+        if _dreamzero_profile_enabled():
+            with _dreamzero_profile_range("dreamzero.video.decode.decord.open"):
+                reader = VideoReader(str(video_path), ctx=cpu(0), num_threads=1)
+            with _dreamzero_profile_range("dreamzero.video.decode.decord.get_batch"):
+                return reader.get_batch(indices).asnumpy()
+        reader = VideoReader(str(video_path), ctx=cpu(0), num_threads=1)
+        return reader.get_batch(indices).asnumpy()
 
     @staticmethod
     def _col_exists(table, name: str) -> bool:
@@ -701,14 +789,26 @@ class DreamZeroLeRobotDataset(Dataset):
             t = self._fixed_window_temporal
             return t.video, t.state, t.action
         assert self._multi_anchor_cfg is not None
-        language = self._read_episode_language_labels(episode_index)
-        temporal = require_multi_anchor_temporal_indices(
-            frame_in_ep,
-            language,
-            ep_len,
-            self._multi_anchor_cfg,
-            episode_index=episode_index,
-        )
+        if _dreamzero_profile_enabled():
+            with _dreamzero_profile_range("dreamzero.temporal.read_language_labels"):
+                language = self._read_episode_language_labels(episode_index)
+            with _dreamzero_profile_range("dreamzero.temporal.multi_anchor_indices"):
+                temporal = require_multi_anchor_temporal_indices(
+                    frame_in_ep,
+                    language,
+                    ep_len,
+                    self._multi_anchor_cfg,
+                    episode_index=episode_index,
+                )
+        else:
+            language = self._read_episode_language_labels(episode_index)
+            temporal = require_multi_anchor_temporal_indices(
+                frame_in_ep,
+                language,
+                ep_len,
+                self._multi_anchor_cfg,
+                episode_index=episode_index,
+            )
         return temporal.video, temporal.state, temporal.action
 
     def _materialize_parquet_sample(
@@ -720,48 +820,108 @@ class DreamZeroLeRobotDataset(Dataset):
         *,
         decode_video: bool,
     ) -> dict[str, Any]:
-        video_offsets, state_offsets, action_offsets = self._temporal_offsets_for_frame(
-            frame_in_ep, episode_index, ep_len
-        )
-        video_idx = self._clip_indices(frame_in_ep + video_offsets, ep_len)
-        state_idx = self._clip_indices(frame_in_ep + state_offsets, ep_len)
-        action_idx = self._clip_indices(frame_in_ep + action_offsets, ep_len)
+        if _dreamzero_profile_enabled():
+            with _dreamzero_profile_range("dreamzero.sample.temporal_offsets"):
+                video_offsets, state_offsets, action_offsets = (
+                    self._temporal_offsets_for_frame(
+                        frame_in_ep, episode_index, ep_len
+                    )
+                )
+            with _dreamzero_profile_range("dreamzero.sample.clip_indices"):
+                video_idx = self._clip_indices(frame_in_ep + video_offsets, ep_len)
+                state_idx = self._clip_indices(frame_in_ep + state_offsets, ep_len)
+                action_idx = self._clip_indices(frame_in_ep + action_offsets, ep_len)
+        else:
+            video_offsets, state_offsets, action_offsets = (
+                self._temporal_offsets_for_frame(frame_in_ep, episode_index, ep_len)
+            )
+            video_idx = self._clip_indices(frame_in_ep + video_offsets, ep_len)
+            state_idx = self._clip_indices(frame_in_ep + state_offsets, ep_len)
+            action_idx = self._clip_indices(frame_in_ep + action_offsets, ep_len)
 
         sample: dict[str, Any] = {
             "episode_index": episode_index,
             "frame_index": frame_in_ep,
         }
         if decode_video:
-            from lerobot.datasets.video_utils import decode_video_frames
-
+            skip_decode = _dreamzero_skip_video_decode()
             for transform_key, source_key in self._source_video_key.items():
-                video_path = self._get_video_path(episode_index, source_key)
-                fps = self._decode_fps_for_video_file(video_path)
-                sample[transform_key] = decode_video_frames(
-                    video_path,
-                    [float(int(i)) / fps for i in video_idx.tolist()],
-                    tolerance_s=self._video_tolerance_s,
-                    backend=self._video_backend,
-                )
+                if skip_decode:
+                    if _dreamzero_profile_enabled():
+                        empty_name = _dreamzero_profile_name(
+                            "dreamzero.video.empty", source_key
+                        )
+                        with _dreamzero_profile_range(empty_name):
+                            sample[transform_key] = self._empty_video_frames(
+                                source_key, len(video_idx)
+                            )
+                    else:
+                        sample[transform_key] = self._empty_video_frames(
+                            source_key, len(video_idx)
+                        )
+                    continue
+                if _dreamzero_profile_enabled():
+                    path_name = _dreamzero_profile_name(
+                        "dreamzero.video.resolve_path", source_key
+                    )
+                    with _dreamzero_profile_range(path_name):
+                        video_path = self._get_video_path(episode_index, source_key)
+                    decode_name = _dreamzero_profile_name(
+                        "dreamzero.video.decode",
+                        self._video_backend,
+                        source_key,
+                    )
+                    with _dreamzero_profile_range(decode_name):
+                        sample[transform_key] = self._decode_video_frames(
+                            video_path, video_idx
+                        )
+                else:
+                    video_path = self._get_video_path(episode_index, source_key)
+                    sample[transform_key] = self._decode_video_frames(video_path, video_idx)
 
-        for key in ("task", "task_index"):
-            if self._col_exists(table, key):
-                sample[key] = table.column(key)[int(frame_in_ep)].as_py()
-        for key, source in self._language_sources.items():
-            if self._col_exists(table, source):
-                sample[key] = table.column(source)[int(frame_in_ep)].as_py()
+        if _dreamzero_profile_enabled():
+            with _dreamzero_profile_range("dreamzero.sample.read_language"):
+                for key in ("task", "task_index"):
+                    if self._col_exists(table, key):
+                        sample[key] = table.column(key)[int(frame_in_ep)].as_py()
+                for key, source in self._language_sources.items():
+                    if self._col_exists(table, source):
+                        sample[key] = table.column(source)[int(frame_in_ep)].as_py()
+        else:
+            for key in ("task", "task_index"):
+                if self._col_exists(table, key):
+                    sample[key] = table.column(key)[int(frame_in_ep)].as_py()
+            for key, source in self._language_sources.items():
+                if self._col_exists(table, source):
+                    sample[key] = table.column(source)[int(frame_in_ep)].as_py()
 
         for source, _ in self._state_components.values():
             if source in sample:
                 continue
             if self._col_exists(table, source):
-                sample[source] = self._read_list_column(table, source, state_idx)
+                if _dreamzero_profile_enabled():
+                    with _dreamzero_profile_range(
+                        _dreamzero_profile_name("dreamzero.sample.read_state", source)
+                    ):
+                        sample[source] = self._read_list_column(
+                            table, source, state_idx
+                        )
+                else:
+                    sample[source] = self._read_list_column(table, source, state_idx)
             elif source == "observation.state" and self._col_exists(
                 table, "observation"
             ):
-                sample[source] = self._read_struct_list_field(
-                    table, "observation", "state", state_idx
-                )
+                if _dreamzero_profile_enabled():
+                    with _dreamzero_profile_range(
+                        "dreamzero.sample.read_state.observation.state"
+                    ):
+                        sample[source] = self._read_struct_list_field(
+                            table, "observation", "state", state_idx
+                        )
+                else:
+                    sample[source] = self._read_struct_list_field(
+                        table, "observation", "state", state_idx
+                    )
             else:
                 raise KeyError(
                     f"episode parquet missing state source column {source!r}"
@@ -773,8 +933,41 @@ class DreamZeroLeRobotDataset(Dataset):
                 raise KeyError(
                     f"episode parquet missing action source column {source!r}"
                 )
-            sample[source] = self._read_list_column(table, source, action_idx)
+            if _dreamzero_profile_enabled():
+                with _dreamzero_profile_range(
+                    _dreamzero_profile_name("dreamzero.sample.read_action", source)
+                ):
+                    sample[source] = self._read_list_column(table, source, action_idx)
+            else:
+                sample[source] = self._read_list_column(table, source, action_idx)
         return sample
+
+    def _decode_video_frames(self, video_path: Path, video_idx: np.ndarray) -> Any:
+        if self._video_backend == "decord":
+            return self._decode_video_frames_decord(video_path, video_idx)
+
+        from lerobot.datasets.video_utils import decode_video_frames
+
+        fps = self._decode_fps_for_video_file(video_path)
+        if _dreamzero_profile_enabled():
+            with _dreamzero_profile_range("dreamzero.video.decode.prepare_timestamps"):
+                timestamps = [float(int(i)) / fps for i in video_idx.tolist()]
+            decode_name = _dreamzero_profile_name(
+                "dreamzero.video.decode.lerobot_decode", self._video_backend
+            )
+            with _dreamzero_profile_range(decode_name):
+                return decode_video_frames(
+                    video_path,
+                    timestamps,
+                    tolerance_s=self._video_tolerance_s,
+                    backend=self._video_backend,
+                )
+        return decode_video_frames(
+            video_path,
+            [float(int(i)) / fps for i in video_idx.tolist()],
+            tolerance_s=self._video_tolerance_s,
+            backend=self._video_backend,
+        )
 
     def _get_lazy_sample(self, idx: int) -> dict[str, Any]:
         frame_in_ep, episode_index, ep_len = self._resolve_index_context(idx)
@@ -903,9 +1096,31 @@ class DreamZeroLeRobotDataset(Dataset):
         return self.dataset[idx]
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
+        if _dreamzero_profile_enabled():
+            with _dreamzero_profile_range("dreamzero.dataset.__getitem__"):
+                return self._getitem_impl(idx)
+        return self._getitem_impl(idx)
+
+    def _getitem_impl(self, idx: int) -> dict[str, Any]:
         last_error: Exception | None = None
         for attempt in range(self.multi_anchor_resample_attempts):
             try:
+                if _dreamzero_profile_enabled():
+                    with _dreamzero_profile_range("dreamzero.dataset.sample_attempt"):
+                        with _dreamzero_profile_range(
+                            "dreamzero.dataset.load_raw_sample"
+                        ):
+                            raw_sample = self._load_raw_sample(idx)
+                        with _dreamzero_profile_range(
+                            "dreamzero.dataset.build_modality"
+                        ):
+                            raw = self._build_modality_dict(raw_sample)
+                        with _dreamzero_profile_range("dreamzero.dataset.transform"):
+                            transformed = self.data_transform(raw)
+                        with _dreamzero_profile_range(
+                            "dreamzero.dataset.collate_ready"
+                        ):
+                            return collate_ready_sample(transformed)
                 raw = self._build_modality_dict(self._load_raw_sample(idx))
                 transformed = self.data_transform(raw)
                 return collate_ready_sample(transformed)
@@ -928,22 +1143,50 @@ class DreamZeroLeRobotDataset(Dataset):
                 raw_frames = sample[transform_key]
             else:
                 raw_frames = sample[source_key]
-            out[transform_key] = self._video_to_thwc_uint8(raw_frames)
+            if _dreamzero_profile_enabled():
+                with _dreamzero_profile_range(
+                    _dreamzero_profile_name(
+                        "dreamzero.modality.video_to_thwc", source_key
+                    )
+                ):
+                    out[transform_key] = self._video_to_thwc_uint8(raw_frames)
+            else:
+                out[transform_key] = self._video_to_thwc_uint8(raw_frames)
 
-        self._put_components(out, sample, self._state_components, is_action=False)
-        self._put_components(out, sample, self._action_components, is_action=True)
+        if _dreamzero_profile_enabled():
+            with _dreamzero_profile_range("dreamzero.modality.state_components"):
+                self._put_components(out, sample, self._state_components, is_action=False)
+            with _dreamzero_profile_range("dreamzero.modality.action_components"):
+                self._put_components(out, sample, self._action_components, is_action=True)
+        else:
+            self._put_components(out, sample, self._state_components, is_action=False)
+            self._put_components(out, sample, self._action_components, is_action=True)
 
-        fallback_text = self._resolve_task_text(sample)
-        wrote_language = False
-        for key in self.language_keys:
-            source = self._language_sources.get(key, key)
-            value = sample.get(key, sample.get(source, ""))
-            text = safe_lang_text(value, self._tasks) if value != "" else ""
-            if text:
-                out[key] = text
-                wrote_language = True
-        if not wrote_language:
-            out[self.language_keys[0]] = fallback_text
+        if _dreamzero_profile_enabled():
+            with _dreamzero_profile_range("dreamzero.modality.language"):
+                fallback_text = self._resolve_task_text(sample)
+                wrote_language = False
+                for key in self.language_keys:
+                    source = self._language_sources.get(key, key)
+                    value = sample.get(key, sample.get(source, ""))
+                    text = safe_lang_text(value, self._tasks) if value != "" else ""
+                    if text:
+                        out[key] = text
+                        wrote_language = True
+                if not wrote_language:
+                    out[self.language_keys[0]] = fallback_text
+        else:
+            fallback_text = self._resolve_task_text(sample)
+            wrote_language = False
+            for key in self.language_keys:
+                source = self._language_sources.get(key, key)
+                value = sample.get(key, sample.get(source, ""))
+                text = safe_lang_text(value, self._tasks) if value != "" else ""
+                if text:
+                    out[key] = text
+                    wrote_language = True
+            if not wrote_language:
+                out[self.language_keys[0]] = fallback_text
         return out
 
 
@@ -976,26 +1219,55 @@ class DreamZeroCollator:
         batch: dict[str, Any] = {}
         for key in features[0]:
             if key == "text":
-                texts = [
-                    format_training_prompt(
-                        normalize_instruction_text(elem[key]),
-                        int(elem["embodiment_id"]),
-                        embodiment_tag_mapping,
-                    )
-                    for elem in features
-                ]
-                ids, mask = tokenizer(texts, return_mask=True, add_special_tokens=True)
+                if _dreamzero_profile_enabled():
+                    with _dreamzero_profile_range("dreamzero.collate.format_text"):
+                        texts = [
+                            format_training_prompt(
+                                normalize_instruction_text(elem[key]),
+                                int(elem["embodiment_id"]),
+                                embodiment_tag_mapping,
+                            )
+                            for elem in features
+                        ]
+                    with _dreamzero_profile_range("dreamzero.collate.tokenize.text"):
+                        ids, mask = tokenizer(
+                            texts, return_mask=True, add_special_tokens=True
+                        )
+                else:
+                    texts = [
+                        format_training_prompt(
+                            normalize_instruction_text(elem[key]),
+                            int(elem["embodiment_id"]),
+                            embodiment_tag_mapping,
+                        )
+                        for elem in features
+                    ]
+                    ids, mask = tokenizer(texts, return_mask=True, add_special_tokens=True)
                 batch[key] = ids
                 batch["text_attention_mask"] = mask
             elif key == "text_negative":
                 values = [elem[key] for elem in features]
-                ids, mask = tokenizer(values, return_mask=True, add_special_tokens=True)
+                if _dreamzero_profile_enabled():
+                    with _dreamzero_profile_range(
+                        "dreamzero.collate.tokenize.text_negative"
+                    ):
+                        ids, mask = tokenizer(
+                            values, return_mask=True, add_special_tokens=True
+                        )
+                else:
+                    ids, mask = tokenizer(values, return_mask=True, add_special_tokens=True)
                 batch[key] = ids
                 batch["text_attention_mask_negative"] = mask
             else:
                 values = [elem[key] for elem in features]
                 try:
-                    batch[key] = torch.from_numpy(np.stack(values))
+                    if _dreamzero_profile_enabled():
+                        with _dreamzero_profile_range(
+                            _dreamzero_profile_name("dreamzero.collate.stack", key)
+                        ):
+                            batch[key] = torch.from_numpy(np.stack(values))
+                    else:
+                        batch[key] = torch.from_numpy(np.stack(values))
                 except ValueError as e:
                     shapes = [np.asarray(v).shape for v in values]
                     raise ValueError(
@@ -1004,6 +1276,11 @@ class DreamZeroCollator:
         return batch
 
     def __call__(self, features: list[dict[str, Any]]) -> dict[str, Any]:
+        if _dreamzero_profile_enabled():
+            with _dreamzero_profile_range("dreamzero.collate"):
+                return self.collate_batch(
+                    features, self.tokenizer, self.embodiment_tag_mapping
+                )
         return self.collate_batch(features, self.tokenizer, self.embodiment_tag_mapping)
 
 
@@ -1106,6 +1383,14 @@ def build_dreamzero_sft_dataloader(
     )
     num_workers = int(cfg.data.get("num_workers", 4))
     prefetch_factor = int(cfg.data.get("prefetch_factor", 4))
+    torch_sharing_strategy = cfg.data.get("torch_sharing_strategy")
+    if torch_sharing_strategy:
+        torch.multiprocessing.set_sharing_strategy(str(torch_sharing_strategy))
+    multiprocessing_context = cfg.data.get("multiprocessing_context")
+    if multiprocessing_context is not None:
+        multiprocessing_context = str(multiprocessing_context)
+        if multiprocessing_context.lower() in ("", "default", "none", "null"):
+            multiprocessing_context = None
     data_loader = StatefulDataLoader(
         dataset,
         batch_size=cfg.actor.micro_batch_size,  # samples per GPU per step
@@ -1115,6 +1400,7 @@ def build_dreamzero_sft_dataloader(
         pin_memory=True,  # faster CPU->GPU transfer
         persistent_workers=num_workers > 0,
         prefetch_factor=prefetch_factor if num_workers > 0 else None,
+        multiprocessing_context=multiprocessing_context if num_workers > 0 else None,
         collate_fn=DreamZeroCollator(
             tokenizer_path=tokenizer_path,
             max_seq_len=max_seq_len,

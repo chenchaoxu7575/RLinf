@@ -14,6 +14,8 @@
 
 import logging
 import os
+import time
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, Optional, Union
 
 from omegaconf.dictconfig import DictConfig
@@ -23,12 +25,37 @@ from rlinf.scheduler import WorkerGroupFuncResult as Handle
 from rlinf.utils.distributed import ScopedTimer
 from rlinf.utils.metric_logger import MetricLogger
 from rlinf.utils.runner_utils import EarlyStopController, check_progress
+from rlinf.utils.utils import nvtx_range
 
 if TYPE_CHECKING:
     from rlinf.workers.reward.reward_worker import FSDPRewardWorker
     from rlinf.workers.sft.fsdp_sft_worker import FSDPSftWorker
 
 logger = logging.getLogger(__name__)
+_PROFILE_TRUE_VALUES = {"1", "true", "yes", "on"}
+
+
+def _profile_enabled() -> bool:
+    return os.environ.get("RLINF_SFT_PROFILE", "").lower() in _PROFILE_TRUE_VALUES
+
+
+def _profile_finalize_sleep_sec() -> float:
+    value = os.environ.get("RLINF_SFT_PROFILE_FINALIZE_SLEEP_SEC", "")
+    if value == "":
+        return 0.0
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        logger.warning(
+            "Invalid RLINF_SFT_PROFILE_FINALIZE_SLEEP_SEC=%r; not sleeping", value
+        )
+        return 0.0
+
+
+def _profile_range(name: str):
+    if not _profile_enabled():
+        return nullcontext()
+    return nvtx_range(name)
 
 
 class SFTRunner:
@@ -82,75 +109,102 @@ class SFTRunner:
             desc="Global Step",
             ncols=800,
         )
-        for _step in range(start_step, self.max_steps):
-            if hasattr(self.actor, "set_global_step"):
-                # set global step
-                self.actor.set_global_step(self.global_step)
-
-            with self.timer("step"):
-                actor_handle: Handle = self.actor.run_training()
-                actor_metrics = actor_handle.wait()
-
-                self.global_step += 1
-
-                eval_model, save_model, _ = check_progress(
-                    self.global_step,
-                    self.max_steps,
-                    self.cfg.runner.val_check_interval,
-                    self.cfg.runner.save_interval,
-                    1.0,
-                    run_time_exceeded=False,
-                )
-
-                if save_model:
-                    self._save_checkpoint()
-
+        with _profile_range(
+            f"sft.runner.profile_window.steps{start_step}_to_{self.max_steps}"
+        ):
+            for _step in range(start_step, self.max_steps):
                 should_stop = False
-                if eval_model:
-                    eval_handle: Handle = self.actor.run_eval()
-                    eval_metrics = eval_handle.wait()
+                eval_model = False
+                with _profile_range(f"sft.runner.step{self.global_step}"):
+                    if hasattr(self.actor, "set_global_step"):
+                        # set global step
+                        self.actor.set_global_step(self.global_step)
 
-                    if self.early_stop is not None:
-                        should_stop, best_val_acc_improved = self.early_stop.update(
-                            eval_metrics[0]
+                    with self.timer("step"):
+                        with _profile_range(
+                            f"sft.runner.step{self.global_step}.actor_run_training"
+                        ):
+                            actor_handle: Handle = self.actor.run_training()
+                        with _profile_range(
+                            f"sft.runner.step{self.global_step}.actor_wait"
+                        ):
+                            actor_metrics = actor_handle.wait()
+
+                        self.global_step += 1
+
+                        eval_model, save_model, _ = check_progress(
+                            self.global_step,
+                            self.max_steps,
+                            self.cfg.runner.val_check_interval,
+                            self.cfg.runner.save_interval,
+                            1.0,
+                            run_time_exceeded=False,
                         )
-                        if best_val_acc_improved:
-                            self._save_checkpoint(is_best=True)
 
-            time_metrics = self.timer.consume_durations()
-            time_metrics["training"] = actor_handle.consume_duration()
-            if eval_model:
-                time_metrics["evaluate"] = eval_handle.consume_duration()
-            time_metrics = {f"time/{k}": v for k, v in time_metrics.items()}
-            merged_actor_metrics = {}
-            # get the merged actor metrics from all ranks
-            for metrics in actor_metrics:
-                for k, v in metrics.items():
-                    if k not in merged_actor_metrics:
-                        merged_actor_metrics[k] = v
-            training_metrics = {
-                f"train/{k}": v for k, v in merged_actor_metrics.items()
-            }
-            self.metric_logger.log(time_metrics, _step)
-            self.metric_logger.log(training_metrics, _step)
+                        if save_model:
+                            self._save_checkpoint()
 
-            logging_metrics = time_metrics
-            logging_metrics.update(training_metrics)
+                        if eval_model:
+                            with _profile_range(
+                                f"sft.runner.step{self.global_step}.actor_run_eval"
+                            ):
+                                eval_handle: Handle = self.actor.run_eval()
+                            with _profile_range(
+                                f"sft.runner.step{self.global_step}.eval_wait"
+                            ):
+                                eval_metrics = eval_handle.wait()
 
-            if eval_model:
-                evaluate_metrics = {f"eval/{k}": v for k, v in eval_metrics[0].items()}
-                logging_metrics.update(evaluate_metrics)
-                self.metric_logger.log(evaluate_metrics, _step)
+                            if self.early_stop is not None:
+                                (
+                                    should_stop,
+                                    best_val_acc_improved,
+                                ) = self.early_stop.update(eval_metrics[0])
+                                if best_val_acc_improved:
+                                    self._save_checkpoint(is_best=True)
 
-            global_pbar.set_postfix(logging_metrics, refresh=False)
-            global_pbar.update(1)
-            if should_stop:
-                break
+                time_metrics = self.timer.consume_durations()
+                time_metrics["training"] = actor_handle.consume_duration()
+                if eval_model:
+                    time_metrics["evaluate"] = eval_handle.consume_duration()
+                time_metrics = {f"time/{k}": v for k, v in time_metrics.items()}
+                merged_actor_metrics = {}
+                # get the merged actor metrics from all ranks
+                for metrics in actor_metrics:
+                    for k, v in metrics.items():
+                        if k not in merged_actor_metrics:
+                            merged_actor_metrics[k] = v
+                training_metrics = {
+                    f"train/{k}": v for k, v in merged_actor_metrics.items()
+                }
+                self.metric_logger.log(time_metrics, _step)
+                self.metric_logger.log(training_metrics, _step)
+
+                logging_metrics = time_metrics
+                logging_metrics.update(training_metrics)
+
+                if eval_model:
+                    evaluate_metrics = {
+                        f"eval/{k}": v for k, v in eval_metrics[0].items()
+                    }
+                    logging_metrics.update(evaluate_metrics)
+                    self.metric_logger.log(evaluate_metrics, _step)
+
+                global_pbar.set_postfix(logging_metrics, refresh=False)
+                global_pbar.update(1)
+                if should_stop:
+                    break
 
         if self.early_stop is not None and self.early_stop.best_val_acc > 0:
             logger.info(
                 f"Early stopping triggered! Best val_acc: {self.early_stop.best_val_acc:.4f}"
             )
+        finalize_sleep_sec = _profile_finalize_sleep_sec()
+        if finalize_sleep_sec > 0:
+            logger.info(
+                "Sleeping %.1fs to let profiling tools finalize reports.",
+                finalize_sleep_sec,
+            )
+            time.sleep(finalize_sleep_sec)
         self.metric_logger.finish()
 
     def run_eval(self) -> None:

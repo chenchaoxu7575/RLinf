@@ -1,0 +1,96 @@
+ARG CUDA_VER=12.4.1
+ARG UBUNTU_VER=22.04
+ARG NVIDIA_BASE_IMAGE=nvidia/cuda:${CUDA_VER}-cudnn-devel-ubuntu${UBUNTU_VER}
+
+FROM ${NVIDIA_BASE_IMAGE}
+
+SHELL ["/bin/bash", "-c"]
+ENV DEBIAN_FRONTEND=noninteractive
+ENV NVIDIA_DRIVER_CAPABILITIES=all
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git vim sudo tmux build-essential python3-dev cmake pkg-config \
+    iproute2 pciutils python3 python3-pip wget unzip curl \
+    libibverbs-dev openssh-server runit runit-systemd \
+    libxcb-xinerama0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+    libxcb-render-util0 libxkbcommon-x11-0 libxcb-xinput0 libxcb-cursor0 \
+    libnss3 libxcomposite1 libxdamage1 libxtst6 && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN pip config set global.index-url https://mirrors.ustc.edu.cn/pypi/simple && \
+    python3 -m pip install -i https://mirrors.ustc.edu.cn/pypi/simple --upgrade pip setuptools wheel uv
+
+ENV HF_HOME=/opt/.cache/huggingface
+ENV UV_PATH=/opt/venv
+ENV UV_LINK_MODE=hardlink
+ENV UV_CACHE_DIR=${UV_PATH}/.cache
+ENV UV_PYTHON_INSTALL_DIR=${UV_PATH}/.python
+ENV UV_DEFAULT_INDEX=https://mirrors.ustc.edu.cn/pypi/simple
+ENV INSTALL_MIRROR_OPTION=--use-mirror
+
+RUN mkdir -p ${HF_HOME} ${UV_PATH}
+WORKDIR ${UV_PATH}
+
+COPY ./pyproject.toml ${UV_PATH}/pyproject.toml
+COPY ./requirements ${UV_PATH}/requirements
+
+RUN cat <<EOF > /usr/local/bin/switch_env
+#!/bin/bash
+if [ -z "\$1" ]; then
+    echo "Usage: switch_env <env_name>"
+    exit 1
+fi
+if [ ! -d "${UV_PATH}/\$1" ]; then
+    echo "Environment \$1 does not exist in ${UV_PATH}."
+    exit 1
+fi
+source ${UV_PATH}/\$1/bin/activate
+EOF
+RUN chmod +x /usr/local/bin/switch_env
+
+RUN bash requirements/install.sh ${INSTALL_MIRROR_OPTION} --platform nvidia embodied --venv dreamzero --model dreamzero --env dummy
+
+RUN printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'if [[ -z "${1:-}" ]]; then' \
+    '    echo "Usage: source switch_env <env_name>" >&2' \
+    '    return 1 2>/dev/null || exit 1' \
+    'fi' \
+    'env_root="${UV_PATH:-/opt/venv}"' \
+    'env_dir="${env_root}/$1"' \
+    'if [[ ! -f "${env_dir}/bin/activate" ]]; then' \
+    '    echo "Environment $1 does not exist in ${env_root}." >&2' \
+    '    return 1 2>/dev/null || exit 1' \
+    'fi' \
+    'source "${env_dir}/bin/activate"' \
+    > /usr/local/bin/switch_env && \
+    chmod +x /usr/local/bin/switch_env
+
+RUN source switch_env dreamzero && pip install nvtx av hf_transfer
+
+RUN git clone --depth 1 https://github.com/RLinf/dreamzero.git /opt/dreamzero
+
+RUN cd /tmp && \
+    wget -q https://developer.nvidia.com/downloads/assets/tools/secure/nsight-systems/2025_3/nsight-systems-2025.3.1_2025.3.1.90-1_amd64.deb && \
+    (dpkg -i nsight-systems-2025.3.1_2025.3.1.90-1_amd64.deb || true) && \
+    apt-get update && apt-get install -f -y && \
+    rm -f nsight-systems-2025.3.1_2025.3.1.90-1_amd64.deb && \
+    rm -rf /var/lib/apt/lists/* && \
+    ln -sf /opt/nvidia/nsight-systems/2025.3.1/target-linux-x64/nsys /usr/local/bin/nsys && \
+    nsys --version
+
+ENV DREAMZERO_PATH=/opt/dreamzero
+ENV PYTHONPATH=/opt/dreamzero:${PYTHONPATH}
+
+RUN echo "source ${UV_PATH}/dreamzero/bin/activate" >> ~/.bashrc
+
+RUN source switch_env dreamzero && \
+    command -v python && \
+    python -c "import av, lerobot, torch, torchcodec; print('dreamzero videoloader env OK', torch.__version__)" && \
+    python -c "import nvtx; print('nvtx OK')" && \
+    nsys --version
+
+RUN uv cache prune
+
+WORKDIR /workspace
+CMD ["/bin/bash"]

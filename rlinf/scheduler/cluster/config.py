@@ -168,6 +168,9 @@ class NsightConfig:
     worker_groups: Optional[list[str] | str] = None
     """Worker group names to profile. If omitted, all worker groups are profiled."""
 
+    worker_ranks: Optional[list[int] | int | str] = None
+    """Worker ranks to profile. If omitted, all ranks in matching worker groups are profiled."""
+
     options: Optional[dict[str, str]] = None
     """Additional ``nsys profile`` options keyed by flag name."""
 
@@ -205,6 +208,27 @@ class NsightConfig:
                     f"But got {type(worker_groups)}: {worker_groups}"
                 )
                 self.worker_groups = [str(group_name) for group_name in worker_groups]
+
+        if self.worker_ranks is not None:
+            worker_ranks = self.worker_ranks
+            if isinstance(worker_ranks, int):
+                self.worker_ranks = [worker_ranks]
+            elif isinstance(worker_ranks, str):
+                self.worker_ranks = [
+                    int(rank.strip())
+                    for rank in worker_ranks.split(",")
+                    if rank.strip() != ""
+                ]
+            else:
+                assert isinstance(worker_ranks, (list, ListConfig)), (
+                    "worker_ranks must be a list of integers, a comma-separated "
+                    "string, or a single integer in cluster nsight config. "
+                    f"But got {type(worker_ranks)}: {worker_ranks}"
+                )
+                self.worker_ranks = [int(rank) for rank in worker_ranks]
+            assert all(rank >= 0 for rank in self.worker_ranks), (
+                "Nsight worker_ranks must be non-negative integers."
+            )
 
         if self.flags is not None:
             flags = self.flags
@@ -250,17 +274,29 @@ class NsightConfig:
                 f"Got duplicates: {overlapping_names}"
             )
 
-    def profiles_worker_group(self, worker_group_name: str) -> bool:
+    def profiles_worker_group(
+        self, worker_group_name: str, worker_rank: Optional[int] = None
+    ) -> bool:
         """Return whether this config should profile the given worker group."""
-        if not self.enabled or not self.worker_groups:
+        if not self.enabled:
             return False
-        normalized_group_names = {
-            group_name.lower() for group_name in self.worker_groups
-        }
-        return (
-            "all" in normalized_group_names
-            or worker_group_name.lower() in normalized_group_names
-        )
+        if self.worker_groups:
+            normalized_group_names = {
+                group_name.lower() for group_name in self.worker_groups
+            }
+            group_matches = (
+                "all" in normalized_group_names
+                or worker_group_name.lower() in normalized_group_names
+            )
+        else:
+            group_matches = True
+        if not group_matches:
+            return False
+        if self.worker_ranks is None:
+            return True
+        if worker_rank is None:
+            return False
+        return int(worker_rank) in self.worker_ranks
 
     def to_cli_tokens(self, default_output_prefix: Optional[str] = None) -> list[str]:
         """Render ``nsys profile`` options into CLI tokens."""

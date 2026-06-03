@@ -1251,7 +1251,7 @@ install_dreamzero_model() {
             uv pip install -r $SCRIPT_DIR/embodied/models/dreamzero.txt
             install_flash_attn
             ;;
-        "")
+        ""|dummy)
             create_and_sync_venv
             install_common_embodied_deps
             uv pip install -r $SCRIPT_DIR/embodied/models/dreamzero.txt

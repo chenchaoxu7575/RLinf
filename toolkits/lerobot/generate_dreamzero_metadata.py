@@ -162,8 +162,8 @@ def _feature_resolution(feature: dict[str, Any]) -> list[int]:
     if "height" in names and "width" in names:
         height = int(shape[names.index("height")])
         width = int(shape[names.index("width")])
-        return [height, width]
-    return [int(shape[0]), int(shape[1])]
+        return [width, height]
+    return [int(shape[1]), int(shape[0])]
 
 
 def _video_metadata_from_feature(

@@ -573,6 +573,7 @@ class Cluster:
         cls,
         python_interpreter_path: str,
         worker_name: str,
+        worker_rank: int,
         nsight_cfg: Optional[NsightConfig],
         nsight_output_dir: Optional[str] = None,
     ) -> str:
@@ -583,7 +584,7 @@ class Cluster:
         from ..manager import WorkerAddress
 
         worker_group_name = WorkerAddress.from_name(worker_name).root_group_name
-        if not nsight_cfg.profiles_worker_group(worker_group_name):
+        if not nsight_cfg.profiles_worker_group(worker_group_name, worker_rank):
             return python_interpreter_path
 
         if nsight_output_dir is None:
@@ -674,6 +675,7 @@ class Cluster:
         python_interpreter_path = self.maybe_prepend_nsight_to_py_executable(
             python_interpreter_path=python_interpreter_path,
             worker_name=worker_name,
+            worker_rank=worker_rank,
             nsight_cfg=self._cluster_cfg.nsight
             if self._cluster_cfg is not None
             else None,
