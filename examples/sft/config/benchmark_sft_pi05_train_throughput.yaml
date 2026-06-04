@@ -1,0 +1,139 @@
+defaults:
+  - model/pi0_5@actor.model
+  - training_backend/fsdp@actor.fsdp_config
+  - override hydra/job_logging: stdout
+  - _self_
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:SFT_PATH}/config/
+
+cluster:
+  num_nodes: 1
+  component_placement:
+    actor: 0-0
+
+runner:
+  task_type: sft
+  logger:
+    log_path: "../codex_notes/training_throughput"
+    project_name: rlinf
+    experiment_name: "sft_pi05_train_throughput"
+    logger_backends: ["tensorboard"]
+
+  max_epochs: -1
+  max_steps: -1
+  val_check_interval: -1
+  save_interval: -1
+
+data:
+  train_data_paths: "synthetic-openpi"
+  val_data_paths: null
+
+actor:
+  group_name: "SftBenchmarkActorGroup"
+  training_backend: "fsdp"
+  micro_batch_size: 1
+  global_batch_size: 1
+  seed: 42
+  enable_offload: False
+
+  model:
+    precision: null
+    model_path: "/workspace/rlinf_pub/models/RLinf-Pi05-LIBERO-SFT"
+    num_action_chunks: 50
+    action_dim: 7
+    add_value_head: False
+    openpi:
+      config_name: "pi05_libero"
+      num_images_in_input: 3
+      action_horizon: ${actor.model.num_action_chunks}
+      action_chunk: ${actor.model.num_action_chunks}
+      action_env_dim: ${actor.model.action_dim}
+      num_steps: 3
+      train_expert_only: True
+      noise_method: "flow_sde"
+      add_value_head: ${actor.model.add_value_head}
+      value_after_vlm: False
+      value_vlm_mode: "mean_token"
+      detach_critic_input: True
+      disable_forced_expert_gradient_checkpointing: True
+
+  optim:
+    lr: 2.5e-5
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    adam_eps: 1.0e-08
+    weight_decay: 1.0e-10
+    clip_grad: 1.0
+    total_training_steps: 100000
+    lr_warmup_steps: 0
+    lr_scheduler: "torch_constant"
+    num_cycles: 0.5
+    min_lr: 0.0
+
+  fsdp_config:
+    strategy: "fsdp"
+    sharding_strategy: "no_shard"
+    use_orig_params: True
+    gradient_checkpointing: False
+    mixed_precision:
+      param_dtype: ${actor.model.precision}
+      reduce_dtype: ${actor.model.precision}
+      buffer_dtype: ${actor.model.precision}
+    amp_autocast:
+      enabled: False
+      precision: "bf16"
+    grad_scaler:
+      enabled: False
+
+benchmark:
+  worker_backend: "local"
+  # Supported modes: expert_only, full_model, action_out_proj_only.
+  mode: "expert_only"
+  warmup_steps: 3
+  measure_steps: 20
+  sync_cuda_timers: True
+  synthetic_epoch_batches: 1000000
+  validate_synthetic_batch_only: False
+  output_dir: null
+  output_csv: null
+  per_step_output_csv: null
+  append_csv: True
+  profile:
+    enabled: True
+    with_flops: True
+    profile_steps: 3
+    peak_tflops_per_gpu: null
+    target_mfu: 0.40
+    record_shapes: False
+    profile_memory: False
+    trace_dir: null
+  producer_scenarios:
+    - scenario_name: "100robot_30hz"
+      num_robots: 100
+      robot_execution_hz: 30
+    - scenario_name: "100robot_60hz"
+      num_robots: 100
+      robot_execution_hz: 60
+    - scenario_name: "100robot_90hz"
+      num_robots: 100
+      robot_execution_hz: 90
+
+nsight_profiler:
+  steps: null
+  discrete: false
+
+  nsight_options:
+    t: "cuda,cudnn,cublas,nvtx,osrt"
+    cuda-memory-usage: "true"
+    capture-range: "cudaProfilerApi"
+    capture-range-end: "repeat-shutdown:10"
+
+  actor:
+    enable: true
+    all_ranks: true
+    ranks: []

@@ -13,11 +13,14 @@
 # limitations under the License.
 
 
+import math
 import os
+from contextlib import contextmanager
 from typing import Optional
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from omegaconf import DictConfig
 from torch.utils.data import DataLoader
@@ -48,6 +51,254 @@ from rlinf.utils.utils import clear_memory, collect_param_names_need_sync
 from rlinf.workers.actor.fsdp_actor_worker import EmbodiedFSDPActor
 
 
+def make_synthetic_dsrl_trajectory(
+    *,
+    num_samples: int,
+    image_shape: list[int] | tuple[int, int, int],
+    state_dim: int,
+    action_noise_dim: int,
+    seed: int,
+    trajectory_index: int = 0,
+    rank: int = 0,
+) -> Trajectory:
+    """Create one CPU replay trajectory for the DSRL SAC training path."""
+    if len(image_shape) != 3:
+        raise ValueError(f"image_shape must be [H, W, C], got {image_shape}")
+    image_h, image_w, image_c = [int(dim) for dim in image_shape]
+    if image_c != 3:
+        raise ValueError(f"DSRL synthetic images must have 3 channels, got {image_c}")
+    if num_samples <= 0:
+        raise ValueError(f"num_samples must be positive, got {num_samples}")
+
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(int(seed) + int(rank) * 100_003 + int(trajectory_index))
+
+    obs_shape = (1, num_samples, image_h, image_w, image_c)
+    state_shape = (1, num_samples, state_dim)
+    action_shape = (1, num_samples, action_noise_dim)
+    scalar_shape = (1, num_samples, 1)
+
+    curr_obs = {
+        "main_images": torch.randint(
+            0, 256, obs_shape, dtype=torch.uint8, generator=generator
+        ),
+        "states": torch.randn(state_shape, dtype=torch.float32, generator=generator),
+    }
+    next_obs = {
+        "main_images": torch.randint(
+            0, 256, obs_shape, dtype=torch.uint8, generator=generator
+        ),
+        "states": torch.randn(state_shape, dtype=torch.float32, generator=generator),
+    }
+
+    return Trajectory(
+        max_episode_length=1,
+        model_weights_id=f"synthetic-r{rank}-t{trajectory_index}",
+        actions=torch.randn(
+            action_shape, dtype=torch.float32, generator=generator
+        ).contiguous(),
+        rewards=torch.randn(
+            scalar_shape, dtype=torch.float32, generator=generator
+        ).contiguous(),
+        terminations=torch.zeros(scalar_shape, dtype=torch.bool),
+        truncations=torch.zeros(scalar_shape, dtype=torch.bool),
+        dones=torch.zeros(scalar_shape, dtype=torch.bool),
+        curr_obs={key: value.contiguous() for key, value in curr_obs.items()},
+        next_obs={key: value.contiguous() for key, value in next_obs.items()},
+    )
+
+
+class DSRLTrainerOnlyPolicy(nn.Module):
+    """DSRL SAC trainer modules without constructing the Pi0.5 VLA policy."""
+
+    def __init__(self, actor_model_cfg: DictConfig):
+        super().__init__()
+        from rlinf.models.embodiment.modules.compact_encoders import (
+            CompactMultiQHead,
+            CompactStateEncoder,
+            LightweightImageEncoder64,
+        )
+        from rlinf.models.embodiment.modules.gaussian_policy import GaussianPolicy
+
+        self.config = actor_model_cfg
+        openpi_cfg = actor_model_cfg.openpi
+        self.use_dsrl = bool(openpi_cfg.use_dsrl)
+        if not self.use_dsrl:
+            raise ValueError("DSRLTrainerOnlyPolicy requires openpi.use_dsrl=True.")
+
+        dsrl_dtype = torch.bfloat16
+        state_dim = int(openpi_cfg.get("dsrl_state_dim", actor_model_cfg.state_dim))
+        action_noise_dim = int(
+            openpi_cfg.get("dsrl_action_noise_dim", actor_model_cfg.action_dim)
+        )
+        image_latent_dim = int(openpi_cfg.get("dsrl_image_latent_dim", 64))
+        state_latent_dim = int(openpi_cfg.get("dsrl_state_latent_dim", 64))
+        hidden_dims = tuple(openpi_cfg.get("dsrl_hidden_dims", [128, 128, 128]))
+        num_q_heads = int(openpi_cfg.get("dsrl_num_q_heads", 10))
+        action_horizon = int(
+            openpi_cfg.get(
+                "action_horizon",
+                openpi_cfg.get("action_chunk", actor_model_cfg.num_action_chunks),
+            )
+        )
+
+        dsrl_input_dim = state_latent_dim + image_latent_dim
+        self.dsrl_action_noise_net = GaussianPolicy(
+            input_dim=dsrl_input_dim,
+            output_dim=action_noise_dim,
+            hidden_dims=hidden_dims,
+            low=None,
+            high=None,
+            action_horizon=action_horizon,
+        ).to(dtype=dsrl_dtype)
+        self.actor_image_encoder = LightweightImageEncoder64(
+            num_images=1,
+            latent_dim=image_latent_dim,
+            image_size=64,
+        ).to(dtype=dsrl_dtype)
+        self.actor_state_encoder = CompactStateEncoder(
+            state_dim=state_dim,
+            hidden_dim=state_latent_dim,
+        ).to(dtype=dsrl_dtype)
+        self.critic_image_encoder = LightweightImageEncoder64(
+            num_images=1,
+            latent_dim=image_latent_dim,
+            image_size=64,
+        ).to(dtype=dsrl_dtype)
+        self.critic_state_encoder = CompactStateEncoder(
+            state_dim=state_dim,
+            hidden_dim=state_latent_dim,
+        ).to(dtype=dsrl_dtype)
+        self.q_head = CompactMultiQHead(
+            state_dim=state_latent_dim,
+            image_dim=image_latent_dim,
+            action_dim=action_noise_dim,
+            hidden_dims=hidden_dims,
+            num_q_heads=num_q_heads,
+            output_dim=1,
+        ).to(dtype=dsrl_dtype)
+
+    def gradient_checkpointing_enable(self):
+        return None
+
+    def gradient_checkpointing_disable(self):
+        return None
+
+    def forward(self, forward_type=ForwardType.DEFAULT, **kwargs):
+        if forward_type == ForwardType.SAC:
+            return self.sac_forward(**kwargs)
+        if forward_type == ForwardType.SAC_Q:
+            return self.sac_q_forward(**kwargs)
+        raise NotImplementedError(
+            f"DSRLTrainerOnlyPolicy supports only SAC/SAC_Q, got {forward_type}."
+        )
+
+    def _normalize_obs(self, obs=None, data=None, **kwargs):
+        if obs is None:
+            obs = data.get("obs", data) if data is not None else kwargs.get("obs", {})
+        if "images" not in obs:
+            if "main_images" in obs:
+                obs = {"images": [obs["main_images"]], "states": obs["states"]}
+            else:
+                raise ValueError(
+                    f"Invalid obs format: {obs.keys()}. Expected 'images' or 'main_images'."
+                )
+        return obs
+
+    def _preprocess_dsrl_images(self, images, train=False):
+        del train
+        agentview_img = images[0] if isinstance(images, list) else images
+        if agentview_img.shape[-1] == 3:
+            agentview_img = agentview_img.permute(0, 3, 1, 2)
+
+        if agentview_img.dtype == torch.uint8:
+            agentview_img = agentview_img.float() / 255.0
+        else:
+            if agentview_img.min() < 0:
+                agentview_img = (agentview_img + 1.0) / 2.0
+        agentview_img = agentview_img.clamp(0.0, 1.0)
+        resized_img = F.interpolate(
+            agentview_img,
+            size=(64, 64),
+            mode="bilinear",
+            align_corners=False,
+        )
+        return (resized_img * 2.0 - 1.0).unsqueeze(1)
+
+    def _preprocess_states(self, states):
+        if states.dim() > 2:
+            states = states.reshape(states.shape[0], -1)
+        if states.dtype != torch.bfloat16:
+            states = states.to(torch.bfloat16)
+        return states
+
+    def sac_forward(
+        self,
+        obs=None,
+        data=None,
+        train=False,
+        return_dist_params=False,
+        **kwargs,
+    ):
+        obs = self._normalize_obs(obs=obs, data=data, **kwargs)
+        images = self._preprocess_dsrl_images(obs["images"], train=train)
+        states = self._preprocess_states(obs["states"])
+
+        device = next(self.actor_image_encoder.parameters()).device
+        images = images.to(device=device, dtype=torch.bfloat16)
+        states = states.to(device=device, dtype=torch.bfloat16)
+
+        image_features = self.actor_image_encoder(images)
+        state_features = self.actor_state_encoder(states)
+        features = torch.cat([state_features, image_features], dim=-1)
+
+        deterministic = kwargs.get("mode", "train") == "eval"
+        action_noise, logprobs = self.dsrl_action_noise_net.sample(
+            features, deterministic=deterministic
+        )
+
+        dist_params = None
+        if return_dist_params:
+            dist = self.dsrl_action_noise_net.forward(features)
+            dist_params = (dist.mean, dist.stddev)
+
+        return action_noise, logprobs, dist_params
+
+    def sac_q_forward(
+        self,
+        obs=None,
+        data=None,
+        actions=None,
+        detach_encoder=False,
+        train=False,
+        **kwargs,
+    ):
+        obs = self._normalize_obs(obs=obs, data=data, **kwargs)
+        if actions is None:
+            actions = kwargs.get("actions")
+        if actions is None:
+            raise ValueError("sac_q_forward requires actions.")
+
+        images = self._preprocess_dsrl_images(obs["images"], train=train)
+        states = self._preprocess_states(obs["states"])
+
+        device = next(self.critic_image_encoder.parameters()).device
+        images = images.to(device=device, dtype=torch.bfloat16)
+        states = states.to(device=device, dtype=torch.bfloat16)
+        actions = actions.to(device=device, dtype=torch.bfloat16)
+
+        image_features = self.critic_image_encoder(images)
+        state_features = self.critic_state_encoder(states)
+        if detach_encoder:
+            image_features = image_features.detach()
+            state_features = state_features.detach()
+
+        if actions.dim() == 3:
+            actions = actions[:, 0, :]
+
+        return self.q_head(state_features, image_features, actions)
+
+
 class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
     def __init__(self, cfg: DictConfig):
         super().__init__(cfg)
@@ -60,6 +311,14 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
         self.alpha_optimizer = None
         self.update_step = 0
         self.enable_drq = bool(getattr(self.cfg.actor, "enable_drq", False))
+
+    def model_provider_func(self) -> nn.Module:
+        benchmark_cfg = self.cfg.get("benchmark", {})
+        use_dsrl = bool(self.cfg.actor.model.get("openpi", {}).get("use_dsrl", False))
+        trainer_only = bool(benchmark_cfg.get("trainer_only_model", False))
+        if use_dsrl and trainer_only:
+            return DSRLTrainerOnlyPolicy(self.cfg.actor.model)
+        return super().model_provider_func()
 
     def init_worker(self):
         self.setup_model_and_optimizer(initialize_target=True)
@@ -249,6 +508,377 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
         assert self.target_update_type in ["all", "q_head_only"], (
             f"{self.target_update_type=} is not suppported!"
         )
+
+    def prefill_synthetic_replay(self, synthetic_replay_cfg: Optional[dict] = None):
+        """Fill the local replay buffer with synthetic DSRL transitions."""
+        if not self.use_dsrl:
+            raise ValueError("Synthetic replay prefill currently supports only DSRL SAC.")
+        if self.demo_buffer is not None:
+            raise ValueError("Synthetic replay prefill does not support demo_buffer.")
+        if self.replay_buffer is None:
+            raise RuntimeError("Replay buffer is not initialized.")
+
+        replay_cfg = synthetic_replay_cfg
+        if replay_cfg is None:
+            benchmark_cfg = self.cfg.get("benchmark", {})
+            replay_cfg = benchmark_cfg.get("synthetic_replay", {})
+
+        clear_existing = bool(replay_cfg.get("clear_existing", True))
+        if clear_existing:
+            self.replay_buffer.clear()
+
+        per_rank_batch = max(1, self.cfg.actor.global_batch_size // self._world_size)
+        if bool(replay_cfg.get("use_cached_batch", False)):
+            self._benchmark_cached_batch = self._make_synthetic_dsrl_batch(
+                replay_cfg, per_rank_batch
+            )
+            stats = {
+                "rank": self._rank,
+                "per_rank_batch_size": per_rank_batch,
+                "use_cached_batch": True,
+                "cache_on_device": bool(replay_cfg.get("cache_on_device", True)),
+                "image_shape": list(replay_cfg.get("image_shape", [224, 224, 3])),
+                "state_dim": int(
+                    replay_cfg.get(
+                        "state_dim",
+                        self.cfg.actor.model.openpi.get(
+                            "dsrl_state_dim", self.cfg.actor.model.get("state_dim", 1)
+                        ),
+                    )
+                ),
+                "action_noise_dim": int(
+                    replay_cfg.get(
+                        "action_noise_dim",
+                        self.cfg.actor.model.openpi.get(
+                            "dsrl_action_noise_dim",
+                            self.cfg.actor.model.get("action_dim", 1),
+                        ),
+                    )
+                ),
+            }
+            self.log_on_first_rank(f"Synthetic replay cached batch prepared: {stats}")
+            return stats
+
+        prefill_batches = int(replay_cfg.get("prefill_batches", 4))
+        min_total_samples = max(1, prefill_batches * per_rank_batch)
+        min_buffer_size = int(self.cfg.algorithm.replay_buffer.get("min_buffer_size", 1))
+        train_actor_steps = max(
+            min_buffer_size, int(self.cfg.algorithm.get("train_actor_steps", 0))
+        )
+        num_trajectories = max(1, prefill_batches, min_buffer_size, train_actor_steps)
+        requested_samples_cfg = replay_cfg.get("samples_per_trajectory", None)
+        requested_samples_per_trajectory = (
+            math.ceil(min_total_samples / num_trajectories)
+            if requested_samples_cfg is None
+            else int(requested_samples_cfg)
+        )
+        samples_per_trajectory = max(
+            1,
+            requested_samples_per_trajectory,
+            math.ceil(min_total_samples / num_trajectories),
+        )
+
+        image_shape = list(replay_cfg.get("image_shape", [224, 224, 3]))
+        seed = int(replay_cfg.get("seed", self.cfg.actor.get("seed", 1234)))
+        openpi_cfg = self.cfg.actor.model.get("openpi", {})
+        state_dim = int(
+            replay_cfg.get(
+                "state_dim",
+                openpi_cfg.get(
+                    "dsrl_state_dim", self.cfg.actor.model.get("state_dim", 1)
+                ),
+            )
+        )
+        action_noise_dim = int(
+            replay_cfg.get(
+                "action_noise_dim",
+                openpi_cfg.get(
+                    "dsrl_action_noise_dim",
+                    self.cfg.actor.model.get("action_dim", 1),
+                ),
+            )
+        )
+
+        trajectories = [
+            make_synthetic_dsrl_trajectory(
+                num_samples=samples_per_trajectory,
+                image_shape=image_shape,
+                state_dim=state_dim,
+                action_noise_dim=action_noise_dim,
+                seed=seed,
+                trajectory_index=trajectory_index,
+                rank=self._rank,
+            )
+            for trajectory_index in range(num_trajectories)
+        ]
+        self.replay_buffer.add_trajectories(trajectories)
+
+        stats = self.replay_buffer.get_stats()
+        stats.update(
+            {
+                "rank": self._rank,
+                "per_rank_batch_size": per_rank_batch,
+                "num_prefill_trajectories": num_trajectories,
+                "samples_per_trajectory": samples_per_trajectory,
+                "image_shape": image_shape,
+                "state_dim": state_dim,
+                "action_noise_dim": action_noise_dim,
+            }
+        )
+        self.log_on_first_rank(f"Synthetic replay prefilled: {stats}")
+        return stats
+
+    def _make_synthetic_dsrl_batch(self, replay_cfg: dict, batch_size: int) -> dict:
+        image_shape = list(replay_cfg.get("image_shape", [224, 224, 3]))
+        if len(image_shape) != 3:
+            raise ValueError(f"image_shape must be [H, W, C], got {image_shape}")
+        image_h, image_w, image_c = [int(dim) for dim in image_shape]
+        if image_c != 3:
+            raise ValueError(f"DSRL synthetic images must have 3 channels, got {image_c}")
+
+        openpi_cfg = self.cfg.actor.model.get("openpi", {})
+        state_dim = int(
+            replay_cfg.get(
+                "state_dim",
+                openpi_cfg.get(
+                    "dsrl_state_dim", self.cfg.actor.model.get("state_dim", 1)
+                ),
+            )
+        )
+        action_noise_dim = int(
+            replay_cfg.get(
+                "action_noise_dim",
+                openpi_cfg.get(
+                    "dsrl_action_noise_dim",
+                    self.cfg.actor.model.get("action_dim", 1),
+                ),
+            )
+        )
+        seed = int(replay_cfg.get("seed", self.cfg.actor.get("seed", 1234)))
+        device = self.device if bool(replay_cfg.get("cache_on_device", True)) else "cpu"
+        generator_device = "cpu" if str(device) == "cpu" else self.device
+        generator = torch.Generator(device=generator_device)
+        generator.manual_seed(int(seed) + int(self._rank) * 100_003)
+
+        obs_shape = (batch_size, image_h, image_w, image_c)
+        state_shape = (batch_size, state_dim)
+        action_shape = (batch_size, action_noise_dim)
+        scalar_shape = (batch_size, 1)
+
+        return {
+            "curr_obs": {
+                "main_images": torch.randint(
+                    0,
+                    256,
+                    obs_shape,
+                    dtype=torch.uint8,
+                    device=device,
+                    generator=generator,
+                ).contiguous(),
+                "states": torch.randn(
+                    state_shape,
+                    dtype=torch.float32,
+                    device=device,
+                    generator=generator,
+                ).contiguous(),
+            },
+            "next_obs": {
+                "main_images": torch.randint(
+                    0,
+                    256,
+                    obs_shape,
+                    dtype=torch.uint8,
+                    device=device,
+                    generator=generator,
+                ).contiguous(),
+                "states": torch.randn(
+                    state_shape,
+                    dtype=torch.float32,
+                    device=device,
+                    generator=generator,
+                ).contiguous(),
+            },
+            "actions": torch.randn(
+                action_shape,
+                dtype=torch.float32,
+                device=device,
+                generator=generator,
+            ).contiguous(),
+            "rewards": torch.randn(
+                scalar_shape,
+                dtype=torch.float32,
+                device=device,
+                generator=generator,
+            ).contiguous(),
+            "terminations": torch.zeros(
+                scalar_shape, dtype=torch.bool, device=device
+            ).contiguous(),
+            "truncations": torch.zeros(
+                scalar_shape, dtype=torch.bool, device=device
+            ).contiguous(),
+            "dones": torch.zeros(scalar_shape, dtype=torch.bool, device=device).contiguous(),
+        }
+
+    @contextmanager
+    def benchmark_timer(self, tag: str):
+        benchmark_cfg = self.cfg.get("benchmark", {})
+        sync_cuda_timers = bool(benchmark_cfg.get("sync_cuda_timers", False))
+        if sync_cuda_timers and torch.cuda.is_available():
+            torch.cuda.synchronize()
+        with self.worker_timer(tag):
+            try:
+                yield
+            finally:
+                if sync_cuda_timers and torch.cuda.is_available():
+                    torch.cuda.synchronize()
+
+    @contextmanager
+    def benchmark_torch_profiler(self, enabled: bool):
+        if not enabled:
+            yield None
+            return
+        if not torch.cuda.is_available():
+            raise RuntimeError("DSRL benchmark MFU profiling requires CUDA.")
+
+        profile_cfg = self.cfg.get("benchmark", {}).get("profile", {})
+        activities = [torch.profiler.ProfilerActivity.CPU]
+        activities.append(torch.profiler.ProfilerActivity.CUDA)
+        with torch.profiler.profile(
+            activities=activities,
+            with_flops=bool(profile_cfg.get("with_flops", True)),
+            record_shapes=bool(profile_cfg.get("record_shapes", False)),
+            profile_memory=bool(profile_cfg.get("profile_memory", False)),
+        ) as profiler:
+            yield profiler
+
+    def _benchmark_profile_stats(self, profiler) -> dict[str, float]:
+        if profiler is None:
+            return {}
+
+        torch.cuda.synchronize(self.device)
+        profile_flops = 0
+        for event in profiler.key_averages():
+            event_flops = getattr(event, "flops", 0)
+            if event_flops:
+                profile_flops += int(event_flops)
+
+        trace_dir = self.cfg.get("benchmark", {}).get("profile", {}).get(
+            "trace_dir", None
+        )
+        if trace_dir:
+            os.makedirs(trace_dir, exist_ok=True)
+            profiler.export_chrome_trace(
+                os.path.join(trace_dir, f"dsrl_profile_rank{self._rank}.json")
+            )
+
+        return {"benchmark/profile_flops": float(profile_flops)}
+
+    @staticmethod
+    def _unique_param_count(params) -> int:
+        seen = set()
+        count = 0
+        for param in params:
+            param_id = id(param)
+            if param_id in seen:
+                continue
+            seen.add(param_id)
+            count += int(param.numel())
+        return count
+
+    @staticmethod
+    def _optimizer_param_count(optimizer) -> int:
+        if optimizer is None:
+            return 0
+        return EmbodiedSACFSDPPolicy._unique_param_count(
+            param for group in optimizer.param_groups for param in group["params"]
+        )
+
+    def get_benchmark_param_summary(self) -> dict[str, int | str | bool]:
+        loaded_model_total_params = self._unique_param_count(self.model.parameters())
+        loaded_model_trainable_params = self._unique_param_count(
+            param for param in self.model.parameters() if param.requires_grad
+        )
+
+        trainer_params = []
+        for optimizer in (self.optimizer, self.qf_optimizer, self.alpha_optimizer):
+            if optimizer is None:
+                continue
+            for group in optimizer.param_groups:
+                trainer_params.extend(group["params"])
+        trainer_trainable_params = self._unique_param_count(trainer_params)
+
+        alpha_params = (
+            self._unique_param_count(self.entropy_temp.parameters())
+            if self.entropy_temp is not None
+            else 0
+        )
+        loaded_target_model_total_params = (
+            self._unique_param_count(self.target_model.parameters())
+            if self.target_model is not None
+            else 0
+        )
+        return {
+            "rank": self._rank,
+            "world_size": self._world_size,
+            "mode": "dsrl",
+            "pi05_forward": False,
+            "model_total_params": trainer_trainable_params,
+            "model_trainable_params": trainer_trainable_params,
+            "trainer_trainable_params": trainer_trainable_params,
+            "loaded_model_total_params": loaded_model_total_params,
+            "loaded_model_trainable_params": loaded_model_trainable_params,
+            "actor_optimizer_params": self._optimizer_param_count(self.optimizer),
+            "critic_optimizer_params": self._optimizer_param_count(self.qf_optimizer),
+            "alpha_optimizer_params": self._optimizer_param_count(
+                self.alpha_optimizer
+            ),
+            "alpha_params": alpha_params,
+            "loaded_target_model_total_params": loaded_target_model_total_params,
+        }
+
+    def _benchmark_reset_gpu_memory_stats(self):
+        benchmark_cfg = self.cfg.get("benchmark", {})
+        if not bool(benchmark_cfg.get("record_gpu_memory", True)):
+            return
+        if not torch.cuda.is_available():
+            return
+        torch.cuda.synchronize(self.device)
+        torch.cuda.reset_peak_memory_stats(self.device)
+
+    def _benchmark_gpu_memory_stats(self) -> dict[str, float]:
+        benchmark_cfg = self.cfg.get("benchmark", {})
+        if not bool(benchmark_cfg.get("record_gpu_memory", True)):
+            return {}
+        if not torch.cuda.is_available():
+            return {}
+
+        torch.cuda.synchronize(self.device)
+        stats = {
+            "benchmark/gpu_memory_allocated_mb": torch.cuda.memory_allocated(
+                self.device
+            )
+            / (1024**2),
+            "benchmark/gpu_memory_reserved_mb": torch.cuda.memory_reserved(
+                self.device
+            )
+            / (1024**2),
+            "benchmark/gpu_memory_peak_allocated_mb": torch.cuda.max_memory_allocated(
+                self.device
+            )
+            / (1024**2),
+            "benchmark/gpu_memory_peak_reserved_mb": torch.cuda.max_memory_reserved(
+                self.device
+            )
+            / (1024**2),
+        }
+        try:
+            free_bytes, total_bytes = torch.cuda.mem_get_info(self.device)
+            stats["benchmark/gpu_memory_used_mb"] = (
+                total_bytes - free_bytes
+            ) / (1024**2)
+        except RuntimeError:
+            pass
+        return stats
 
     def _init_target_shadow(self):
         """Create persistent float32 shadow of target model parameters.
@@ -556,7 +1186,9 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
         )
 
         with self.worker_timer("sample"):
-            global_batch = next(self.buffer_dataloader_iter)
+            global_batch = getattr(self, "_benchmark_cached_batch", None)
+            if global_batch is None:
+                global_batch = next(self.buffer_dataloader_iter)
 
         train_micro_batch_list = split_dict_to_chunk(
             global_batch,
@@ -575,9 +1207,11 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
         gbs_critic_loss = []
         all_critic_metrics = {}
         for batch in train_micro_batch_list:
-            critic_loss, critic_metrics = self.forward_critic(batch)
+            with self.benchmark_timer("benchmark_forward_critic"):
+                critic_loss, critic_metrics = self.forward_critic(batch)
             critic_loss = critic_loss / self.gradient_accumulation
-            critic_loss.backward()
+            with self.benchmark_timer("benchmark_backward_critic"):
+                critic_loss.backward()
             gbs_critic_loss.append(critic_loss.item() * self.gradient_accumulation)
             append_to_dict(all_critic_metrics, critic_metrics)
         all_critic_metrics = {
@@ -603,9 +1237,11 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
             gbs_entropy = []
             all_actor_metrics = {}
             for batch in train_micro_batch_list:
-                actor_loss, entropy, q_metrics = self.forward_actor(batch)
+                with self.benchmark_timer("benchmark_forward_actor"):
+                    actor_loss, entropy, q_metrics = self.forward_actor(batch)
                 actor_loss = actor_loss / self.gradient_accumulation
-                actor_loss.backward()
+                with self.benchmark_timer("benchmark_backward_actor"):
+                    actor_loss.backward()
                 gbs_actor_loss.append(actor_loss.item() * self.gradient_accumulation)
                 gbs_entropy.append(entropy.item())
                 append_to_dict(all_actor_metrics, q_metrics)
@@ -626,8 +1262,12 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
                 self.alpha_optimizer.zero_grad()
                 gbs_alpha_loss = []
                 for batch in train_micro_batch_list:
-                    alpha_loss = self.forward_alpha(batch) / self.gradient_accumulation
-                    alpha_loss.backward()
+                    with self.benchmark_timer("benchmark_forward_alpha"):
+                        alpha_loss = (
+                            self.forward_alpha(batch) / self.gradient_accumulation
+                        )
+                    with self.benchmark_timer("benchmark_backward_alpha"):
+                        alpha_loss.backward()
                     gbs_alpha_loss.append(
                         alpha_loss.item() * self.gradient_accumulation
                     )
@@ -702,15 +1342,16 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
 
     @NsightProfiler.annotate("actor/run_training")
     @Worker.timer("run_training")
-    def run_training(self):
+    def run_training(self, benchmark_profile: bool = False):
         """SAC training using replay buffer"""
         if self.cfg.actor.get("enable_offload", False):
             self.load_param_and_grad(self.device)
             self.load_optimizer(self.device)
 
+        using_cached_batch = getattr(self, "_benchmark_cached_batch", None) is not None
         # Check if replay buffer has enough samples
         min_buffer_size = self.cfg.algorithm.replay_buffer.get("min_buffer_size", 100)
-        if not self.replay_buffer.is_ready(min_buffer_size):
+        if not using_cached_batch and not self.replay_buffer.is_ready(min_buffer_size):
             self.log_on_first_rank(
                 f"Replay buffer size {len(self.replay_buffer)} < {min_buffer_size}, skipping training"
             )
@@ -719,7 +1360,7 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
         # Delay actor training until buffer has enough samples
         train_actor_steps = self.cfg.algorithm.get("train_actor_steps", 0)
         train_actor_steps = max(min_buffer_size, train_actor_steps)
-        train_actor = self.replay_buffer.is_ready(train_actor_steps)
+        train_actor = using_cached_batch or self.replay_buffer.is_ready(train_actor_steps)
 
         assert (
             self.cfg.actor.global_batch_size
@@ -735,13 +1376,20 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
         self.model.train()
         metrics = {}
 
+        self._benchmark_reset_gpu_memory_stats()
+
         update_epoch = self.cfg.algorithm.get("update_epoch", 1)
-        for _ in range(update_epoch):
-            metrics_data = self.update_one_epoch(train_actor=train_actor)
-            append_to_dict(metrics, metrics_data)
-            self.update_step += 1
+        with self.benchmark_torch_profiler(benchmark_profile) as profiler:
+            for _ in range(update_epoch):
+                metrics_data = self.update_one_epoch(train_actor=train_actor)
+                append_to_dict(metrics, metrics_data)
+                self.update_step += 1
+            if profiler is not None:
+                profiler.step()
 
         mean_metric_dict = self.process_train_metrics(metrics)
+        mean_metric_dict.update(self._benchmark_gpu_memory_stats())
+        mean_metric_dict.update(self._benchmark_profile_stats(profiler))
 
         torch.cuda.synchronize()
         torch.distributed.barrier()

@@ -61,6 +61,7 @@ class OpenPi0Config(Pi0Config):
     num_steps: int = 10  # denoise steps
     # training config
     train_expert_only: bool = False
+    disable_forced_expert_gradient_checkpointing: bool = False
     safe_get_logprob: bool = False
     joint_logprob: bool = False  # designed for flow-noise
     double_layer: bool = False  # designed for flow-sde without acceleration
@@ -351,8 +352,24 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
             actions = actions.to(device=device)
         actions = actions.to(dtype=torch.float32)
 
+        # OpenPI's Pi0.5 expert forward currently forces expert gradient
+        # checkpointing whenever the joint transformer module is in training
+        # mode. Some RLinf/FSDP OpenPI configs explicitly disable checkpointing,
+        # so keep this opt-in guard scoped to the wrapper/config.
+        joint_transformer_training = None
+        if (
+            self.config.disable_forced_expert_gradient_checkpointing
+            and hasattr(self, "paligemma_with_expert")
+        ):
+            joint_transformer_training = self.paligemma_with_expert.training
+            self.paligemma_with_expert.training = False
+
         # PI0Pytorch.forward returns per-element MSE (reduction="none").
-        loss = super().forward(observation, actions)
+        try:
+            loss = super().forward(observation, actions)
+        finally:
+            if joint_transformer_training is not None:
+                self.paligemma_with_expert.training = joint_transformer_training
         if use_action_chunk_loss:
             loss = loss[:, : self.config.action_chunk, : self.config.action_env_dim]
         return loss.mean()
