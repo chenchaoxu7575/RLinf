@@ -1,0 +1,64 @@
+defaults:
+  - model/pi0_5@actor.model
+  - override hydra/job_logging: stdout
+  - _self_
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:SFT_PATH}/config/
+
+runner:
+  task_type: sft
+  logger:
+    log_path: "../codex_notes/inference_throughput"
+    project_name: rlinf
+    experiment_name: "pi05_inference_throughput"
+    logger_backends: ["tensorboard"]
+
+actor:
+  seed: 42
+  model:
+    precision: bf16
+    model_path: "/workspace/rlinf_pub/models/RLinf-Pi05-LIBERO-SFT"
+    num_action_chunks: 50
+    action_dim: 7
+    add_value_head: False
+    openpi:
+      config_name: "pi05_libero"
+      num_images_in_input: 3
+      action_horizon: ${actor.model.num_action_chunks}
+      action_chunk: ${actor.model.num_action_chunks}
+      action_env_dim: ${actor.model.action_dim}
+      num_steps: 3
+      train_expert_only: True
+      noise_method: "flow_sde"
+      add_value_head: ${actor.model.add_value_head}
+      value_after_vlm: False
+      value_vlm_mode: "mean_token"
+      detach_critic_input: True
+      disable_forced_expert_gradient_checkpointing: True
+
+benchmark:
+  warmup_steps: 3
+  measure_steps: 20
+  sync_cuda_timers: True
+  output_dir: null
+  output_csv: null
+  append_csv: True
+  inference:
+    device_ids: all
+    batch_size: 1
+    batch_list: null
+    image_size: 224
+    state_dim: 8
+    mode: train
+    compute_values: True
+    breakdown_steps: 3
+    per_step_csv: null
+    machine_label: null
+    task_description: "pick up the object and place it in the target area"
+    use_wrist_images: True
+    use_extra_view_images: False
