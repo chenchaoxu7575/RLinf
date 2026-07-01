@@ -1,0 +1,95 @@
+# ============================================================================
+# pi0.5 + dummy turtle2 — NSYS "BEFORE PIPELINE": 1 robot : 1 GPU, NON-decoupled.
+# Serial env<->rollout ping-pong: rollout GPU idles while the robot executes its
+# action chunk (step_frequency stepping). Rollout worker is nsys-profiled and
+# exits cleanly after eval -> clean .nsys-rep. Compare against _nsys_overlap.
+# ============================================================================
+defaults:
+  - env/realworld_button@env.eval
+  - model/pi0_5@rollout.model
+  - override hydra/job_logging: stdout
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}/config/
+
+cluster:
+  num_nodes: 1
+  component_placement:
+    env,rollout: 0
+  profiling:
+    backend: nsight
+    worker_groups: [RolloutGroup]
+    output_dir: /tmp/turtle2_nsys/serial
+    options:
+      t: cuda,cudnn,cublas,nvtx
+      sample: none
+      cuda-memory-usage: "true"
+      # PR977 mechanism: gate capture via the CUDA Profiler API. nsys only
+      # records between torch.cuda.profiler.start()/stop() (driven by the
+      # RLINF_CUDA_PROF=1 gate in the rollout worker's eval loop).
+      capture-range: cudaProfilerApi
+      capture-range-end: stop
+
+runner:
+  task_type: embodied_eval
+  logger:
+    log_path: "../results"
+    project_name: rlinf
+    experiment_name: "turtle2_dummy_eval_pi05_nsys_serial"
+    logger_backends: ["tensorboard"]
+
+  max_epochs: 1
+  max_steps: -1
+
+  only_eval: True
+  val_check_interval: -1
+  save_interval: -1
+
+  resume_dir: null
+  ckpt_path: null
+
+env:
+  group_name: "EnvGroup"
+
+  eval:
+    rollout_epoch: 3
+    total_num_envs: 1
+    max_episode_steps: 100
+    max_steps_per_rollout_epoch: 100
+    auto_reset: True
+    ignore_terminations: True
+    is_eval: True
+    seed: 42
+    override_cfg:
+      is_dummy: True
+      use_arm_ids: [1]
+      use_camera_ids: [0, 1, 2]
+      target_ee_pose: [[0, 0, 0, 0, 0, 0], [0.0, 0.0, 0.15, 0.0, 1, 0.0]]
+      step_frequency: 30.0
+
+rollout:
+  group_name: "RolloutGroup"
+  generation_backend: "huggingface"
+  unnorm_key: turtle
+  enable_offload: False
+  pipeline_stage_num: 1
+
+  collect_transitions: False
+  collect_prev_infos: False
+
+  model:
+    model_path: "/workspace/rlinf_pub/models/RLinf-Pi05-LIBERO-SFT"
+    model_type: "openpi"
+    action_dim: 6
+    num_action_chunks: 50
+    num_steps: 3
+    add_value_head: False
+    openpi:
+      config_name: "pi05_turtle"
+      num_images_in_input: 3
+      num_steps: ${rollout.model.num_steps}
+      detach_critic_input: True

@@ -15,6 +15,7 @@
 import asyncio
 import copy
 import gc
+import os
 import time
 from typing import Any, Callable, Literal, Optional
 
@@ -783,27 +784,42 @@ class MultiStepRolloutWorker(Worker):
                     route_key=self._group_route_key(),
                 )
         else:
-            for _ in tqdm(
-                range(self.eval_rollout_epoch),
-                desc="Evaluating Rollout Epochs",
-                disable=(self._rank != 0),
-            ):
-                for _ in range(self.n_eval_chunk_steps):
-                    for _ in range(self.num_pipeline_stages):
-                        env_output = await self.recv_env_output(
-                            input_channel=input_channel,
-                            tag="eval_rollout_results",
-                            batch_size=self.eval_batch_size,
-                        )
-                        actions, _ = self.predict(env_output["obs"], mode="eval")
-                        if isinstance(actions, torch.Tensor):
-                            actions = actions.detach().cpu().contiguous()
-                        self.send_rollout_result(
-                            output_channel=output_channel,
-                            rollout_result=actions,
-                            tag="eval_rollout_results",
-                            batch_size=self.eval_batch_size,
-                        )
+            # Opt-in CUDA capture gate (PR977 mechanism): with nsys
+            # ``capture-range=cudaProfilerApi`` set, nsys only records between
+            # ``torch.cuda.profiler.start()`` and ``stop()``. Whole-process tracing
+            # fails to capture kernels on this host; this gate makes it reliable.
+            _cuda_prof = os.environ.get("RLINF_CUDA_PROF") == "1"
+            try:
+                for epoch_idx in tqdm(
+                    range(self.eval_rollout_epoch),
+                    desc="Evaluating Rollout Epochs",
+                    disable=(self._rank != 0),
+                ):
+                    # Skip the first epoch (warmup/compile) so the capture window
+                    # reflects steady-state inference.
+                    if _cuda_prof and epoch_idx == 1:
+                        self.torch_platform.synchronize()
+                        torch.cuda.profiler.start()
+                    for _ in range(self.n_eval_chunk_steps):
+                        for _ in range(self.num_pipeline_stages):
+                            env_output = await self.recv_env_output(
+                                input_channel=input_channel,
+                                tag="eval_rollout_results",
+                                batch_size=self.eval_batch_size,
+                            )
+                            actions, _ = self.predict(env_output["obs"], mode="eval")
+                            if isinstance(actions, torch.Tensor):
+                                actions = actions.detach().cpu().contiguous()
+                            self.send_rollout_result(
+                                output_channel=output_channel,
+                                rollout_result=actions,
+                                tag="eval_rollout_results",
+                                batch_size=self.eval_batch_size,
+                            )
+            finally:
+                if _cuda_prof:
+                    self.torch_platform.synchronize()
+                    torch.cuda.profiler.stop()
 
             if self.enable_offload:
                 self.offload_model()
