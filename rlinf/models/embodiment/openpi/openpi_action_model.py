@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import math
+import os
 import random
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -22,6 +23,19 @@ from typing import Any, Literal
 import numpy as np
 import torch
 import torch.nn.functional as F
+
+# Opt-in: no-op openpi's ``@at.typecheck`` (jaxtyped + beartype runtime
+# type/shape validation on the ``Observation`` dataclass). On the eager PyTorch
+# rollout path it costs ~2ms/predict of pure CPU with the GPU idle (verified
+# bit-exact: the check never changes values). Rollout obs shapes are stable, so
+# this is safe once the pipeline is validated. Must run BEFORE openpi model
+# classes are decorated at import, hence before the openpi imports below.
+# Default off (typecheck stays on); set RLINF_DISABLE_OPENPI_TYPECHECK=1 to enable.
+if os.environ.get("RLINF_DISABLE_OPENPI_TYPECHECK") == "1":
+    import openpi.shared.array_typing as _at
+
+    _at.typecheck = lambda t: t
+
 from openpi import transforms as _transforms
 from openpi.models import model as _model
 from openpi.models.pi0_config import Pi0Config
