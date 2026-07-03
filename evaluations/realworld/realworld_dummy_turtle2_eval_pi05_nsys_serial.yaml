@@ -33,18 +33,17 @@ cluster:
       # RLINF_CUDA_PROF=1 gate in the rollout worker's eval loop).
       capture-range: cudaProfilerApi
       capture-range-end: stop
-      # GPU metrics sampling (SMs Active / SM Issue / Tensor Active / DRAM BW)
-      # CANNOT be enabled here when workers run inside enroot: the container
-      # lives in a non-init user namespace, and with the driver default
-      # RmProfilingAdminOnly=1 the perf-counter permission check requires
-      # CAP_SYS_ADMIN in the *init* namespace (ERR_NVGPUCTRPERM; nsys reports
-      # "Illegal --gpu-metrics-devices argument" because no GPU passes the
-      # check). Either reload the driver with
-      # NVreg_RestrictProfilingToAdminUsers=0, or run a concurrent host-side
-      # metrics-only session:
-      #   nsys profile --gpu-metrics-devices=<idx> -t none --sample=none \
-      #     --duration=<s> -o host_gpu_metrics
-      # gpu-metrics-devices: "0"
+      # GPU metrics sampling (SMs Active / SM Issue / Tensor Active / DRAM BW
+      # rows in the nsys timeline). Index is the *system* GPU index the
+      # rollout worker is pinned to. Perf-counter access requires admin in the
+      # *init* user namespace (driver default RmProfilingAdminOnly=1), so a
+      # plain `enroot start` fails with ERR_NVGPUCTRPERM (surfaced as "Illegal
+      # --gpu-metrics-devices argument"). Launch via a mount-ns-only nsenter
+      # instead, which keeps the init user namespace:
+      #   enroot start ... sleep infinity &   # sleeper owns the mount ns
+      #   nsenter -t <sleeper-pid> -m bash -c '<run_eval.sh ...>'
+      # Also stop dcgm-exporter first -- it holds the counters.
+      gpu-metrics-devices: "0"
 
 runner:
   task_type: embodied_eval
