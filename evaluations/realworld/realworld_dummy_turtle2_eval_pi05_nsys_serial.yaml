@@ -19,7 +19,12 @@ hydra:
 cluster:
   num_nodes: 1
   component_placement:
-    env,rollout: 0
+    # Separate keys so env/rollout world sizes can differ. realworld envs are
+    # 1 env per worker, so batch size = env world size: override
+    # cluster.component_placement.env="0:0-<N-1>" (N workers packed on GPU 0)
+    # together with env.eval.total_num_envs=N for a bs=N sweep.
+    env: "0:0-0"
+    rollout: 0
   profiling:
     backend: nsight
     worker_groups: [RolloutGroup]
