@@ -33,6 +33,11 @@ cluster:
       # RLINF_CUDA_PROF=1 gate in the rollout worker's eval loop).
       capture-range: cudaProfilerApi
       capture-range-end: stop
+      # GPU metrics sampling (SMs Active / SM Issue / Tensor Active / DRAM BW
+      # rows in the nsys timeline). Index is the *system* GPU index of the
+      # rollout worker (component_placement pins it to GPU 0). Requires root
+      # or perf-counter permissions.
+      gpu-metrics-devices: "0"
 
 runner:
   task_type: embodied_eval
