@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
@@ -30,6 +31,43 @@ from rlinf.utils.utils import (
 from .base import RecvFn, SendFn, WeightSyncer
 from .bucket_syncer import BucketWeightSyncer, iter_named_tensor_buckets
 from .compressor import PatchCompressor
+
+
+def _pin_memory_available() -> bool:
+    """Whether pinned (page-locked) host memory can be used for CPU weight sync.
+
+    Requires an available accelerator, since pinned host allocation needs a device
+    context; falls back to the pageable path when none is present.
+    """
+    return (
+        Worker.torch_platform is not None
+        and hasattr(Worker.torch_platform, "is_available")
+        and Worker.torch_platform.is_available()
+    )
+
+
+def _copy_to_pinned_cpu(tensor: torch.Tensor) -> torch.Tensor:
+    """Copy an accelerator tensor into freshly pinned host memory (fast D2H).
+
+    Tensors already on the host are returned unchanged. The copy is blocking, so
+    the buffer is populated before it is transported.
+    """
+    if tensor.device.type == "cpu":
+        return tensor
+    pinned = torch.empty(tensor.shape, dtype=tensor.dtype, pin_memory=True)
+    pinned.copy_(tensor)
+    return pinned
+
+
+def _copy_pinned_to_device(tensor: torch.Tensor, device: torch.device) -> torch.Tensor:
+    """Move a host tensor to ``device`` through a pinned bounce buffer (fast H2D)."""
+    if tensor.device == device:
+        return tensor
+    if tensor.is_pinned():
+        return tensor.to(device=device, non_blocking=False)
+    staging = torch.empty(tensor.shape, dtype=tensor.dtype, pin_memory=True)
+    staging.copy_(tensor)
+    return staging.to(device=device, non_blocking=False)
 
 
 def downscale_nonnegative_indices(tensor: torch.Tensor) -> torch.Tensor:
@@ -945,6 +983,32 @@ class PatchWeightSyncer(WeightSyncer):
             raise ValueError("State dict keys do not match snapshot keys")
         return self.patch_builder.create_patch(state_dict, version)
 
+    @staticmethod
+    def _infer_model_device(model: torch.nn.Module) -> torch.device | None:
+        """Return the device the model's tensors live on, or ``None`` if empty."""
+        for tensor in model.parameters():
+            return tensor.device
+        for tensor in model.buffers():
+            return tensor.device
+        return None
+
+    @staticmethod
+    def _map_patch_fields(
+        patch: EmptyWeightPatch | WeightPatch,
+        mover: Callable[[torch.Tensor], torch.Tensor],
+    ) -> EmptyWeightPatch | WeightPatch:
+        """Rebuild ``patch`` with ``mover`` applied to every tensor field."""
+        if isinstance(patch, EmptyWeightPatch):
+            return EmptyWeightPatch(version=mover(patch.version))
+        return WeightPatch(
+            version=mover(patch.version),
+            ordinals=mover(patch.ordinals),
+            nnz_per_tensor=mover(patch.nnz_per_tensor),
+            rows=mover(patch.rows),
+            cols=mover(patch.cols),
+            values=mover(patch.values),
+        )
+
     async def sync(
         self,
         state_dict: dict[str, torch.Tensor | DTensor],
@@ -952,10 +1016,16 @@ class PatchWeightSyncer(WeightSyncer):
         version: int | torch.Tensor,
     ) -> None:
         patch = self.create_patch(state_dict, version)
-        transport_patch = patch.to(
-            device=self.transport_device,
-            non_blocking=self.transport_device.type != "cpu",
-        )
+        if self.transport_device.type == "cpu" and _pin_memory_available():
+            # Stage the accelerator-resident patch into pinned host memory so the
+            # device-to-host copy runs at full bandwidth instead of the slow
+            # pageable copy that ``patch.to("cpu")`` would perform.
+            transport_patch = self._map_patch_fields(patch, _copy_to_pinned_cpu)
+        else:
+            transport_patch = patch.to(
+                device=self.transport_device,
+                non_blocking=self.transport_device.type != "cpu",
+            )
         if isinstance(transport_patch, EmptyWeightPatch):
             await send(transport_patch)
         else:
@@ -979,6 +1049,16 @@ class PatchWeightSyncer(WeightSyncer):
                 fallback_keepalive.clear()
             return int(payload.version.item())
         patch = self.compressor.decompress(payload)
+        if self.transport_device.type == "cpu" and _pin_memory_available():
+            # The payload arrived in pageable host memory (off the wire). Stage the
+            # whole patch onto the accelerator up front through pinned bounce
+            # buffers so the transfer runs at full bandwidth and the per-tensor
+            # scatter loop below runs entirely on-device.
+            target_device = self._infer_model_device(model)
+            if target_device is not None and target_device.type != "cpu":
+                patch = self._map_patch_fields(
+                    patch, lambda t: _copy_pinned_to_device(t, target_device)
+                )
         applied_version = int(patch.version.item())
         total_nnz = int(patch.nnz_per_tensor.to(torch.int64).sum().item())
         assert patch.rows.numel() == patch.cols.numel(), (
