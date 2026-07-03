@@ -33,11 +33,18 @@ cluster:
       # RLINF_CUDA_PROF=1 gate in the rollout worker's eval loop).
       capture-range: cudaProfilerApi
       capture-range-end: stop
-      # GPU metrics sampling (SMs Active / SM Issue / Tensor Active / DRAM BW
-      # rows in the nsys timeline). Index is the *system* GPU index of the
-      # rollout worker (component_placement pins it to GPU 0). Requires root
-      # or perf-counter permissions.
-      gpu-metrics-devices: "0"
+      # GPU metrics sampling (SMs Active / SM Issue / Tensor Active / DRAM BW)
+      # CANNOT be enabled here when workers run inside enroot: the container
+      # lives in a non-init user namespace, and with the driver default
+      # RmProfilingAdminOnly=1 the perf-counter permission check requires
+      # CAP_SYS_ADMIN in the *init* namespace (ERR_NVGPUCTRPERM; nsys reports
+      # "Illegal --gpu-metrics-devices argument" because no GPU passes the
+      # check). Either reload the driver with
+      # NVreg_RestrictProfilingToAdminUsers=0, or run a concurrent host-side
+      # metrics-only session:
+      #   nsys profile --gpu-metrics-devices=<idx> -t none --sample=none \
+      #     --duration=<s> -o host_gpu_metrics
+      # gpu-metrics-devices: "0"
 
 runner:
   task_type: embodied_eval
