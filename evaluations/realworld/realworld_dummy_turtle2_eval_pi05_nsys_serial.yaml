@@ -33,6 +33,9 @@ cluster:
       # RLINF_CUDA_PROF=1 gate in the rollout worker's eval loop).
       capture-range: cudaProfilerApi
       capture-range-end: stop
+      # Trace kernels *inside* CUDA graphs individually (inductor cudagraph
+      # from torch.compile max-autotune); default "graph" shows opaque blobs.
+      cuda-graph-trace: node
       # GPU metrics sampling (SMs Active / SM Issue / Tensor Active / DRAM BW
       # rows in the nsys timeline). Index is the *system* GPU index the
       # rollout worker is pinned to. Perf-counter access requires admin in the
@@ -88,6 +91,11 @@ rollout:
   unnorm_key: turtle
   enable_offload: False
   pipeline_stage_num: 1
+  # The production inference path (#968): inductor emits a CUDA graph for the
+  # gemma_expert denoise step. Epoch 0 absorbs the compile; the profiler gate
+  # starts capturing at epoch 1.
+  enable_torch_compile: True
+  torch_compile_mode: "max-autotune"
 
   collect_transitions: False
   collect_prev_infos: False
