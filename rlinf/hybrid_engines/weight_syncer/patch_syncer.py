@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -44,6 +45,18 @@ def _pin_memory_available() -> bool:
         and hasattr(Worker.torch_platform, "is_available")
         and Worker.torch_platform.is_available()
     )
+
+
+def _force_full_weight_sync() -> bool:
+    """Whether to transfer the full dense weights every sync (bucket-streamed)
+    instead of a sparse delta patch.
+
+    The delta patch is empty when the weights did not change, which makes the
+    CPU-transport bandwidth unobservable; forcing a full transfer sends a
+    realistic payload through the same ``sync()``/``apply()`` path. Enabled with
+    ``RLINF_WEIGHT_SYNC_FORCE_FULL=1``.
+    """
+    return os.environ.get("RLINF_WEIGHT_SYNC_FORCE_FULL", "") not in ("", "0")
 
 
 def _copy_to_pinned_cpu(tensor: torch.Tensor) -> torch.Tensor:
@@ -767,6 +780,13 @@ class PatchWeightSyncer(WeightSyncer):
             compression_algorithm=compression_algorithm,
             transport_device=self.transport_device,
         )
+        # Receiver dtypes recorded at sender init, needed by the full-weight path.
+        self._receiver_dtypes: dict[str, torch.dtype] | None = None
+        # A single reusable pinned host buffer (arena) for the full-weight path,
+        # preallocated at init and sized to the largest bucket. Every bucket is
+        # staged through slices of it, so host-pinned memory stays bounded by one
+        # bucket (~init_sync_bucket_size) instead of the whole model.
+        self._pinned_bucket_arena: torch.Tensor | None = None
 
     def _select_init_sync_weights(
         self,
@@ -883,6 +903,7 @@ class PatchWeightSyncer(WeightSyncer):
         self.original_shapes = metadata["original_shapes"]
         self.param_names_need_sync = param_names_need_sync
         receiver_dtypes = metadata["receiver_dtypes"]
+        self._receiver_dtypes = receiver_dtypes
 
         if set(state_dict.keys()) != set(self.ordered_keys):
             raise ValueError("Sender state dict keys do not match receiver keys")
@@ -935,6 +956,9 @@ class PatchWeightSyncer(WeightSyncer):
             self.snapshot_device,
             self.delta_encoding,
         )
+        self._ensure_bucket_arena(
+            self.param_names_need_sync, state_dict, receiver_dtypes
+        )
         self._sender_initialized = True
 
     async def init_receiver(
@@ -967,6 +991,7 @@ class PatchWeightSyncer(WeightSyncer):
         )
         if self.init_sync_enabled:
             await self._apply_init_weights(state_dict, recv)
+        self._ensure_bucket_arena(self.ordered_keys, state_dict, receiver_dtypes)
         self._receiver_initialized = True
 
     @torch.no_grad()
@@ -993,6 +1018,17 @@ class PatchWeightSyncer(WeightSyncer):
         return None
 
     @staticmethod
+    def _infer_state_device(
+        state_dict: dict[str, torch.Tensor | DTensor],
+    ) -> torch.device | None:
+        """Return the accelerator device the sender's weights live on."""
+        for value in state_dict.values():
+            tensor = materialize_tensor(value)
+            if tensor.device.type != "cpu":
+                return tensor.device
+        return None
+
+    @staticmethod
     def _map_patch_fields(
         patch: EmptyWeightPatch | WeightPatch,
         mover: Callable[[torch.Tensor], torch.Tensor],
@@ -1009,12 +1045,162 @@ class PatchWeightSyncer(WeightSyncer):
             values=mover(patch.values),
         )
 
+    def _full_sync_uses_pinned(self) -> bool:
+        """Whether the full-weight path stages through the pinned bucket arena."""
+        return (
+            _force_full_weight_sync()
+            and self.transport_device.type == "cpu"
+            and _pin_memory_available()
+        )
+
+    def _ensure_bucket_arena(
+        self,
+        keys: list[str],
+        reference_dict: dict[str, torch.Tensor | DTensor],
+        dtypes: dict[str, torch.dtype],
+    ) -> None:
+        """Preallocate the reusable pinned bucket arena at init.
+
+        Sized to the largest bucket ``iter_named_tensor_buckets`` will emit for
+        this model (bucket_size, or a single oversized tensor), plus slack for
+        8-byte slice alignment and the metadata scalars. No-op unless the pinned
+        full-weight path is active, so a normal (delta) run never page-locks it.
+        """
+        if not self._full_sync_uses_pinned() or not keys:
+            return
+        bucket_size = self.init_sync_bucket_size
+        max_aligned = 0
+        aligned = 0
+        unaligned = 0
+        for key in keys:
+            tensor = materialize_tensor(reference_dict[key])
+            nbytes = tensor.numel() * torch.empty(0, dtype=dtypes[key]).element_size()
+            aligned = ((aligned + 7) & ~7) + nbytes
+            unaligned += nbytes
+            max_aligned = max(max_aligned, aligned)
+            if unaligned >= bucket_size:
+                aligned = 0
+                unaligned = 0
+        arena_bytes = max_aligned + 4096  # slack for metadata + alignment
+        self._pinned_bucket_arena = torch.empty(
+            arena_bytes, dtype=torch.uint8, pin_memory=True
+        )
+
+    def _carve_bucket_view(
+        self, offset: int, reference: torch.Tensor
+    ) -> tuple[torch.Tensor, int]:
+        """Carve an 8-byte-aligned pinned view matching ``reference`` from the
+        arena, returning it and the next offset. Falls back to a fresh pinned
+        tensor if the arena is missing or too small (should not happen)."""
+        nbytes = reference.numel() * reference.element_size()
+        offset = (offset + 7) & ~7
+        end = offset + nbytes
+        arena = self._pinned_bucket_arena
+        if arena is None or end > arena.numel():
+            fresh = torch.empty(reference.shape, dtype=reference.dtype, pin_memory=True)
+            return fresh, offset
+        view = arena[offset:end].view(reference.dtype).view(reference.shape)
+        return view, end
+
+    async def _sync_full_weights(
+        self,
+        state_dict: dict[str, torch.Tensor | DTensor],
+        send: SendFn,
+        version: int | torch.Tensor,
+    ) -> None:
+        """Send the full dense weights every sync, bucket-streamed. Each bucket is
+        staged (D2H) through slices of the reusable pinned arena, so host-pinned
+        memory stays bounded by one bucket regardless of model size."""
+        assert self._receiver_dtypes is not None, (
+            "Full-weight sync requires sender init to have recorded receiver dtypes"
+        )
+        use_pinned = self._full_sync_uses_pinned()
+        state_device = self._infer_state_device(state_dict)
+        gpu_stage = use_pinned and state_device is not None
+        bucket_device = state_device if gpu_stage else self.transport_device
+        for bucket in iter_named_tensor_buckets(
+            list(state_dict.items()),
+            version,
+            bucket_size=self.init_sync_bucket_size,
+            bucket_device=bucket_device,
+            dtype_resolver=lambda key, dtype: self._receiver_dtypes.get(key, dtype),
+        ):
+            if gpu_stage:
+                staged: dict[str, torch.Tensor] = {}
+                offset = 0
+                for key, value in bucket.items():
+                    view, offset = self._carve_bucket_view(offset, value)
+                    view.copy_(value)  # blocking D2H into the pinned arena slice
+                    staged[key] = view
+                bucket = staged
+            await send(bucket)
+
+    @torch.no_grad()
+    def _apply_full_weight_bucket(
+        self,
+        state_dict: dict[str, torch.Tensor | DTensor],
+        bucket: dict[str, torch.Tensor],
+        use_pinned: bool,
+    ) -> None:
+        offset = 0
+        for key, value in bucket.items():
+            if key not in state_dict:
+                raise ValueError(
+                    f"Full-weight sync receiver key {key} does not exist in state_dict"
+                )
+            target = state_dict[key]
+            if isinstance(target, DTensor):
+                raise TypeError(
+                    "Full-weight sync receiver does not support DTensor state_dict values"
+                )
+            if use_pinned and value.device.type == "cpu" and not value.is_pinned():
+                # Bounce the pageable off-the-wire tensor through the pinned arena
+                # slice, then copy to the device at full bandwidth.
+                view, offset = self._carve_bucket_view(offset, value)
+                view.copy_(value)
+                target.copy_(view, non_blocking=False)
+            else:
+                target.copy_(value, non_blocking=False)
+
+    @torch.no_grad()
+    async def _apply_full_weights(
+        self,
+        model: torch.nn.Module,
+        recv: RecvFn,
+    ) -> int:
+        """Receiver side of the full dense weight path."""
+        state_dict = model.state_dict()
+        target_device = self._infer_model_device(model)
+        use_pinned = (
+            self.transport_device.type == "cpu"
+            and _pin_memory_available()
+            and target_device is not None
+            and target_device.type != "cpu"
+        )
+        bucket = await recv()
+        if not isinstance(bucket, dict):
+            raise TypeError("Full-weight sync receiver expected a bucket payload dict")
+        total_buckets = int(bucket.pop(BucketWeightSyncer._TOTAL_BUCKETS_KEY).item())
+        applied_version = int(bucket.pop(BucketWeightSyncer._SYNCER_VERSION_KEY).item())
+        self._apply_full_weight_bucket(state_dict, bucket, use_pinned)
+        for _ in range(total_buckets - 1):
+            bucket = await recv()
+            if not isinstance(bucket, dict):
+                raise TypeError(
+                    "Full-weight sync receiver expected a bucket payload dict"
+                )
+            self._apply_full_weight_bucket(state_dict, bucket, use_pinned)
+        return applied_version
+
     async def sync(
         self,
         state_dict: dict[str, torch.Tensor | DTensor],
         send: SendFn,
         version: int | torch.Tensor,
     ) -> None:
+        if _force_full_weight_sync():
+            await self._sync_full_weights(state_dict, send, version)
+            return
         patch = self.create_patch(state_dict, version)
         if self.transport_device.type == "cpu" and _pin_memory_available():
             # Stage the accelerator-resident patch into pinned host memory so the
@@ -1036,6 +1222,9 @@ class PatchWeightSyncer(WeightSyncer):
         assert self.ordered_keys is not None and self.original_shapes is not None, (
             "Snapshot info not initialized"
         )
+
+        if _force_full_weight_sync():
+            return await self._apply_full_weights(model, recv)
 
         payload: WeightPatchTransport = await recv()
 
