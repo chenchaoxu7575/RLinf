@@ -39,19 +39,6 @@ observation at a time (locked decision).
 
 ## Environment
 
-### Option A — our benchmark machine (zero setup)
-
-Machine `10.172.160.142` (SH-OV-M003, 4× RTX PRO 5000). Everything below is
-already installed; this is the exact environment the baseline was measured in.
-
-```bash
-enroot start --rw --mount /root/chenchaox/rlinf_pub:/workspace/rlinf_pub rlinf-blackwell
-# inside: source /opt/venv/openpi/bin/activate
-cd /workspace/rlinf_pub/RLinf-pi05-nsys-profile
-```
-
-### Option B — your own machine
-
 - **Image:** `docker.io/chenchaoxnv/rlinf:0.2-maniskill_libero-blackwell`
   (CUDA 12.8.1, torch 2.7.1+cu128, nsys 2025.3.1, flash-attn for
   sm_90/100/120). ⚠️ If `/opt/venv/openpi` is missing in that tag, install
@@ -140,16 +127,17 @@ nsys profile -t cuda,cudnn,cublas,nvtx --sample=none \
   time. Use the e2e wall-clock row for MFU math; per-phase rows are for
   locating work, not for utilization claims.
 
-### GPU metrics sampling (SM occupancy rows) under enroot
+### GPU metrics sampling (SM occupancy rows) in containers
 
 Perf-counter access needs admin in the *init* user namespace
-(`RmProfilingAdminOnly=1`), so a plain `enroot start` fails with
+(`RmProfilingAdminOnly=1`). Under Docker, run privileged. Under enroot, a
+plain `enroot start` creates a user namespace and fails with
 `ERR_NVGPUCTRPERM` — surfaced misleadingly as
-`Illegal --gpu-metrics-devices argument`. Working recipe:
+`Illegal --gpu-metrics-devices argument`. Working enroot recipe:
 
 ```bash
-systemctl stop dcgm_exporter          # holds the counters; restart after
-enroot start --rw --mount ... rlinf-blackwell sleep infinity &   # sleeper owns the mount ns
+systemctl stop dcgm_exporter          # if present — it holds the counters; restart after
+enroot start --rw --mount ... <container> sleep infinity &   # sleeper owns the mount ns
 nsenter -t <sleeper-pid> -m bash -c 'cd /workspace/... && nsys profile --gpu-metrics-devices=0 ...'
 ```
 
@@ -172,9 +160,6 @@ Then add `--gpu-metrics-devices=<system gpu index>` to the nsys command.
 
 ## Where the analysis artifacts live
 
-Reference reps, the E0–E3 optimization matrix, bs sweeps, and the
-MFU/SM-utilization analysis scripts (`mfu_calc.py`, `sm_util_analysis.py`,
-`cpu_nvtx_query.py`) are on the benchmark machine under
-`claude_mem/pi05_rollout_forward/nsys_sm120/` (main rep:
-`opt_E3/rlinf_profile_RolloutGroup_0_2631406.nsys-rep`). Ask us for a copy
-if you are working remotely.
+Reference nsys reps, the controlled optimization matrix (E0–E3), bs sweeps,
+and the MFU/SM-utilization analysis scripts are kept internally — ask the
+authors for a copy if you need same-caliber baselines to diff against.
