@@ -86,6 +86,7 @@ from rlinf.utils.utils import (
     retrieve_model_state_dict_in_cpu,
 )
 from rlinf.workers.rollout.utils import RankMapper
+from rlinf.utils.nsight_profiler import NsightProfiler
 
 
 def process_nested_dict_for_adv(nested_dict, rollout_epoch):
@@ -312,6 +313,7 @@ class FSDPActor(FSDPModelManager, Worker):
             model_bucket_list.append(model_bucket)
         return model_bucket_list
 
+    @NsightProfiler.annotate("actor/sync_model_to_rollout")
     def sync_model_to_rollout(self) -> None:
         """
         Sync the model's full state dict to the rollout worker.
@@ -481,6 +483,7 @@ class FSDPActor(FSDPModelManager, Worker):
             op_type=self.entropy_op_type,
         )
 
+    @NsightProfiler.annotate("actor/forward_batch")
     def forward_batch(
         self, m_batch: dict[str, torch.Tensor], calculate_entropy: bool = False
     ) -> torch.Tensor:
@@ -702,6 +705,7 @@ class FSDPActor(FSDPModelManager, Worker):
             f"Expected {total_result_len_per_dp} sequences from channel, but got {total_result_len}"
         )
 
+    @NsightProfiler.annotate("actor/training_step")
     def training_step(
         self, batch: dict[str, torch.Tensor] | BatchResizingIterator
     ) -> tuple[dict[str, torch.Tensor], float, list[float]]:
@@ -835,6 +839,7 @@ class FSDPActor(FSDPModelManager, Worker):
         mean_metric_dict["actor/lr"] = lr_list[0]
         return mean_metric_dict
 
+    @NsightProfiler.annotate("actor/run_training_pipeline")
     def run_training_pipeline(self, input_channel: Channel) -> tuple[dict, list]:
         self.model.train()
         train_batch_iterator = BatchResizingIterator(
@@ -889,6 +894,7 @@ class FSDPActor(FSDPModelManager, Worker):
         )
         return batch
 
+    @NsightProfiler.annotate("actor/run_training")
     def run_training(
         self, input_channel: Channel, do_offload=False
     ) -> tuple[dict, list]:
@@ -1058,6 +1064,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
 
         return model
 
+    @NsightProfiler.annotate("actor/sync_model_to_rollout")
     def sync_model_to_rollout(self) -> None:
         """
         Sync the model's full state dict to the rollout worker.
@@ -1080,6 +1087,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         if self.enable_offload and not self.is_weight_offloaded:
             self.offload_param_and_grad()
 
+    @NsightProfiler.annotate("actor/recv_rollout_trajectories")
     async def recv_rollout_trajectories(self, input_channel: Channel) -> None:
         """
         Receive rollout trajectories from rollout workers.
@@ -1292,6 +1300,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             )
 
     @Worker.timer("run_training")
+    @NsightProfiler.annotate("actor/run_training")
     def run_training(self) -> None:
         """
         Run the training process using the received rollout batch.

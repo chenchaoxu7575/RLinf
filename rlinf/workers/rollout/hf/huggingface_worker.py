@@ -35,6 +35,7 @@ from rlinf.utils.comm_mapping import CommMapper
 from rlinf.utils.metric_utils import compute_split_num
 from rlinf.utils.placement import HybridComponentPlacement
 from rlinf.utils.utils import get_model_weights_id
+from rlinf.utils.nsight_profiler import NsightProfiler
 
 
 class MultiStepRolloutWorker(Worker):
@@ -204,6 +205,7 @@ class MultiStepRolloutWorker(Worker):
         )
 
     @Worker.timer("predict")
+    @NsightProfiler.annotate("rollout/predict")
     def predict(
         self, env_obs: dict[str, Any], mode: Literal["train", "eval"] = "train"
     ) -> tuple[torch.Tensor, dict[str, Any]]:
@@ -302,6 +304,7 @@ class MultiStepRolloutWorker(Worker):
         gc.collect()
         self.torch_platform.empty_cache()
 
+    @NsightProfiler.annotate("rollout/send_trajectories")
     async def send_rollout_trajectories(
         self, rollout_result: EmbodiedRolloutResult, channel: Channel
     ):
@@ -312,6 +315,7 @@ class MultiStepRolloutWorker(Worker):
             channel.put(trajectory, async_op=True)
 
     @Worker.timer("generate_one_epoch")
+    @NsightProfiler.annotate("rollout/generate_one_epoch")
     async def generate_one_epoch(self, input_channel: Channel, output_channel: Channel):
         last_obs = [None for i in range(self.num_pipeline_stages)]
         for _ in range(self.n_train_chunk_steps):
@@ -405,6 +409,7 @@ class MultiStepRolloutWorker(Worker):
                 )
                 self.rollout_results[stage_id].append_transitions(curr_obs, next_obs)
 
+    @NsightProfiler.annotate("rollout/generate")
     async def generate(
         self, input_channel: Channel, output_channel: Channel, actor_channel: Channel
     ):
@@ -466,6 +471,7 @@ class MultiStepRolloutWorker(Worker):
                 eval_batch_size=self.eval_batch_size,
             )
 
+    @NsightProfiler.annotate("rollout/recv_env_output")
     async def recv_env_output(
         self, input_channel: Channel, mode: Literal["train", "eval"] = "train"
     ) -> dict[str, torch.Tensor]:

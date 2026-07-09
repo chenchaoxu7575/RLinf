@@ -26,6 +26,7 @@ from rlinf.envs.wrappers import RecordVideo
 from rlinf.scheduler import Channel, Cluster, Worker
 from rlinf.utils.comm_mapping import CommMapper
 from rlinf.utils.placement import HybridComponentPlacement
+from rlinf.utils.nsight_profiler import NsightProfiler
 
 
 class EnvWorker(Worker):
@@ -205,6 +206,7 @@ class EnvWorker(Worker):
                     self.env_list[i].offload()
 
     @Worker.timer("env_interact_step")
+    @NsightProfiler.annotate("env/interact_step")
     def env_interact_step(
         self, chunk_actions: torch.Tensor, stage_id: int
     ) -> tuple[EnvOutput, dict[str, Any]]:
@@ -270,6 +272,7 @@ class EnvWorker(Worker):
         )
         return env_output, env_info
 
+    @NsightProfiler.annotate("env/evaluate_step")
     def env_evaluate_step(
         self, raw_actions: torch.Tensor, stage_id: int
     ) -> tuple[EnvOutput, dict[str, Any]]:
@@ -313,6 +316,7 @@ class EnvWorker(Worker):
         )
         return env_output, env_info
 
+    @NsightProfiler.annotate("env/recv_actions")
     def recv_chunk_actions(self, input_channel: Channel, mode="train") -> np.ndarray:
         """Receive and merge chunked actions for the current env worker.
 
@@ -350,6 +354,7 @@ class EnvWorker(Worker):
         )
         return chunk_action
 
+    @NsightProfiler.annotate("env/finish_rollout")
     def finish_rollout(self, mode="train"):
         # reset
         if mode == "train":
@@ -368,6 +373,7 @@ class EnvWorker(Worker):
                 if not self.cfg.env.eval.auto_reset:
                     self.eval_env_list[i].update_reset_state_ids()
 
+    @NsightProfiler.annotate("env/split_batch")
     def split_env_batch(
         self,
         env_batch: dict[str, Any],
@@ -427,6 +433,7 @@ class EnvWorker(Worker):
 
         return splitted_env_batches
 
+    @NsightProfiler.annotate("env/send_batch")
     def send_env_batch(
         self,
         output_channel: Channel,
@@ -453,6 +460,7 @@ class EnvWorker(Worker):
                 key=CommMapper.build_channel_key(self._rank, rank, extra=mode),
             )
 
+    @NsightProfiler.annotate("env/bootstrap_step")
     def bootstrap_step(self) -> list[EnvOutput]:
         def get_zero_dones() -> torch.Tensor:
             return (
@@ -501,6 +509,7 @@ class EnvWorker(Worker):
 
         return env_outputs
 
+    @NsightProfiler.annotate("env/record_metrics")
     def record_env_metrics(
         self, env_metrics: dict[str, list], env_info: dict[str, Any], epoch: int
     ):
@@ -516,6 +525,7 @@ class EnvWorker(Worker):
             else:
                 env_metrics[key].append(value)
 
+    @NsightProfiler.annotate("env/store_last_obs")
     def store_last_obs_and_intervened_info(self, env_output_list: list[EnvOutput]):
         self.last_obs_list = [env_output.obs for env_output in env_output_list]
         self.last_intervened_info_list = [
@@ -524,6 +534,7 @@ class EnvWorker(Worker):
         ]
 
     @Worker.timer("interact")
+    @NsightProfiler.annotate("env/interact")
     def interact(self, input_channel: Channel, output_channel: Channel):
         env_metrics = defaultdict(list)
         for epoch in range(self.rollout_epoch):
@@ -554,6 +565,7 @@ class EnvWorker(Worker):
 
         return env_metrics
 
+    @NsightProfiler.annotate("env/evaluate")
     def evaluate(self, input_channel: Channel, output_channel: Channel):
         eval_metrics = defaultdict(list)
 
