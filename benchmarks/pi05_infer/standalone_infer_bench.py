@@ -237,9 +237,12 @@ def run_phases(model, env_obs: dict, args: argparse.Namespace) -> None:
     from openpi.models import model as _model
 
     def timed(name: str, fn):
+        # Untimed warmup call: invoking the internals directly (instead of via
+        # predict_action_batch) can trigger one dynamo recompile on the first
+        # call, which must not land in the timed window.
+        out = fn()
         torch.cuda.synchronize()
         t0 = time.perf_counter()
-        out = None
         for _ in range(args.iters):
             out = fn()
         torch.cuda.synchronize()
