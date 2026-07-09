@@ -74,9 +74,12 @@ typecheck gate must live at its definition site.
 One download contains the safetensors and the norm stats:
 
 ```bash
-huggingface-cli download RLinf/RLinf-Pi05-LIBERO-SFT \
+hf download RLinf/RLinf-Pi05-LIBERO-SFT \
     --local-dir /workspace/rlinf_pub/models/RLinf-Pi05-LIBERO-SFT
 ```
+
+(`hf` is the current huggingface_hub CLI; the legacy `huggingface-cli`
+entry point is deprecated and non-functional in recent versions.)
 
 First run also fetches the PaliGemma tokenizer into `~/.cache/openpi/`;
 on an offline box, copy that cache dir from a machine that has it.
