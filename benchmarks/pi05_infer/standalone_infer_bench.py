@@ -230,9 +230,13 @@ def run_e2e(model, env_obs: dict, args: argparse.Namespace) -> None:
 def run_phases(model, env_obs: dict, args: argparse.Namespace) -> None:
     """Sync-timed decomposition of one predict call into its NVTX phases.
 
-    Re-invokes the same internals predict_action_batch uses, syncing around
-    each phase, so per-phase numbers are true wall clock. The sum can differ
-    slightly from the e2e number (thread-pool overlap, allocator effects).
+    The GPU phases are re-invoked with the exact tensors captured from a
+    real predict call (via a temporary wrapper around _build_prefix_cache).
+    Re-deriving the intermediates independently can yield tensors with a
+    different memory format (NCHW-contiguous instead of channels_last),
+    which makes torch.compile recompile a slower vision-tower variant and
+    overstate the prefix phase. The sum can still differ slightly from the
+    e2e number (thread-pool overlap, allocator effects).
     """
     from openpi.models import model as _model
 
@@ -250,10 +254,33 @@ def run_phases(model, env_obs: dict, args: argparse.Namespace) -> None:
         return out
 
     acc: dict[str, float] = {}
-    with torch.no_grad():
-        # One full pass to get representative outputs for output_transform.
-        _, _ = model.predict_action_batch(env_obs, mode="eval")
 
+    # Capture the prefix-phase inputs/outputs from one genuine predict so the
+    # timed GPU phases see bit-identical tensors (shape, dtype, and strides).
+    captured: dict[str, tuple] = {}
+    orig_build_prefix_cache = model._build_prefix_cache
+
+    def _capturing_build_prefix_cache(images, img_masks, lang_tokens, lang_masks):
+        out = orig_build_prefix_cache(images, img_masks, lang_tokens, lang_masks)
+        captured["prefix_args"] = (images, img_masks, lang_tokens, lang_masks)
+        captured["prefix_out"] = out
+        return out
+
+    model._build_prefix_cache = _capturing_build_prefix_cache
+    try:
+        with torch.no_grad():
+            model.predict_action_batch(env_obs, mode="eval")
+    finally:
+        model._build_prefix_cache = orig_build_prefix_cache
+    assert "prefix_args" in captured, (
+        "predict_action_batch did not call _build_prefix_cache; "
+        "the phase decomposition no longer matches the model code."
+    )
+    images, img_masks, lang_tokens, lang_masks = captured["prefix_args"]
+    _, prefix_pad_masks, past_key_values = captured["prefix_out"]
+
+    with torch.no_grad():
+        # CPU-side phases (memory-format independent, re-derived per call).
         to_process = timed(
             "predict/obs_processor", lambda: model.obs_processor(env_obs)
         )
@@ -271,14 +298,12 @@ def run_phases(model, env_obs: dict, args: argparse.Namespace) -> None:
             "denoise/preprocess",
             lambda: model._preprocess_observation(observation, train=False),
         )
-        images, img_masks, lang_tokens, lang_masks, state = preprocessed
-        prefix = timed(
+        state = preprocessed[4]
+        # GPU phases, replayed with the captured production tensors.
+        timed(
             "prefix (embed+mask+vlm_forward)",
-            lambda: model._build_prefix_cache(
-                images, img_masks, lang_tokens, lang_masks
-            ),
+            lambda: orig_build_prefix_cache(images, img_masks, lang_tokens, lang_masks),
         )
-        _, prefix_pad_masks, past_key_values = prefix
 
         def denoise_loop():
             # Eval path replica: every step is flow_ode (denoise_inds == -1).
