@@ -41,11 +41,11 @@ observation at a time (locked decision).
 
 - **Image:** `docker.io/chenchaoxnv/rlinf:0.2-maniskill_libero-blackwell`
   (CUDA 12.8.1, torch 2.7.1+cu128, nsys 2025.3.1, flash-attn for
-  sm_90/100/120). ⚠️ If `/opt/venv/openpi` is missing in that tag, install
-  openpi into a venv first (`pip install` from
-  https://github.com/Physical-Intelligence/openpi, pytorch extra) — the
-  patches in step 2 below are based on the openpi build shipped in our
-  containers (2026-07); diff before applying to a different version.
+  sm_90/100/120). The openpi environment ships in the image at
+  `/opt/venv/openpi` — activate it before running:
+  `source /opt/venv/openpi/bin/activate`. The patches in step 2 below are
+  based on that openpi build (2026-07); if you use a different openpi
+  install instead, diff before applying.
 - **GPU:** anything sm_90+; see the cross-GPU caveat above.
 
 ### 1. Repo
