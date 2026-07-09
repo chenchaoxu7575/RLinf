@@ -56,12 +56,16 @@ Verified container workflow (fresh 2× RTX PRO 5000 machine, driver 595):
 
 ```bash
 docker pull chenchaox72877/rlinf:0.2-maniskill_libero-blackwell
-docker run -d --name pi05bench --gpus all --shm-size=16g \
+docker run -d --name pi05bench --gpus all --cap-add=SYS_ADMIN --shm-size=16g \
     -v <host_workdir>:/workspace/rlinf_pub \
     chenchaox72877/rlinf:0.2-maniskill_libero-blackwell sleep infinity
 docker exec -it pi05bench bash
 # inside: source /opt/venv/openpi/bin/activate
 ```
+
+(`--cap-add=SYS_ADMIN` is only needed for nsys GPU-metrics sampling — SM
+utilization rows; drop it if you never profile with
+`--gpu-metrics-devices`.)
 
 `<host_workdir>` holds the repo checkout and the checkpoint, laid out as
 `/workspace/rlinf_pub/{RLinf,models/RLinf-Pi05-LIBERO-SFT}` inside the
@@ -159,18 +163,31 @@ nsys profile -t cuda,cudnn,cublas,nvtx --sample=none \
 ### GPU metrics sampling (SM occupancy rows) in containers
 
 Perf-counter access needs admin in the *init* user namespace
-(`RmProfilingAdminOnly=1`). Under Docker, run privileged. Under enroot, a
-plain `enroot start` creates a user namespace and fails with
+(`RmProfilingAdminOnly=1`), and a dcgm-exporter on the host will hold the
+counters — stop it first if present (restore after).
+
+**Docker (verified):** start the container with `--cap-add=SYS_ADMIN`
+(see the workflow above) and add `--gpu-metrics-devices=<system gpu index>`
+to the nsys command:
+
+```bash
+nsys profile -t cuda,cudnn,cublas,nvtx --sample=none \
+    --cuda-memory-usage=true \
+    --capture-range=cudaProfilerApi --capture-range-end=stop \
+    --cuda-graph-trace=node --gpu-metrics-devices=0 \
+    -o pi05_infer_gpumetrics \
+    python benchmarks/pi05_infer/standalone_infer_bench.py --cuda-profiler
+```
+
+**enroot:** a plain `enroot start` creates a user namespace and fails with
 `ERR_NVGPUCTRPERM` — surfaced misleadingly as
-`Illegal --gpu-metrics-devices argument`. Working enroot recipe:
+`Illegal --gpu-metrics-devices argument`. Working recipe:
 
 ```bash
 systemctl stop dcgm_exporter          # if present — it holds the counters; restart after
 enroot start --rw --mount ... <container> sleep infinity &   # sleeper owns the mount ns
 nsenter -t <sleeper-pid> -m bash -c 'cd /workspace/... && nsys profile --gpu-metrics-devices=0 ...'
 ```
-
-Then add `--gpu-metrics-devices=<system gpu index>` to the nsys command.
 
 ## Known pitfalls
 
