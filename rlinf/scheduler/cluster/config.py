@@ -186,6 +186,15 @@ class NsightConfig:
     ``options`` (unless the user has already set them explicitly). Steps
     are 0-indexed and match the runner's global step counter."""
 
+    ranks: Optional[list[int]] = None
+    """Worker ranks (within each group) to wrap with ``nsys profile``.
+
+    ``None`` (default) profiles every rank. Wrapping every rank makes Ray
+    nsys-wrap its whole per-node worker pool, which on many-core hosts spawns
+    hundreds of nsys processes and stalls Ray worker registration. Restrict to
+    a couple of ranks (e.g. ``[0, 1]``) to profile all worker groups on just
+    those ranks while keeping process count tractable."""
+
     @staticmethod
     def _stringify_option_value(option_value: object) -> str:
         if isinstance(option_value, bool):
@@ -274,6 +283,16 @@ class NsightConfig:
             self.options.setdefault("capture-range", "cudaProfilerApi")
             self.options.setdefault("capture-range-end", "stop")
 
+        if self.ranks is not None:
+            assert isinstance(self.ranks, (list, ListConfig)), (
+                "ranks must be a list of ints in cluster nsight config. "
+                f"But got {type(self.ranks)}: {self.ranks}"
+            )
+            self.ranks = [int(rank) for rank in self.ranks]
+            assert all(rank >= 0 for rank in self.ranks), (
+                f"Nsight ranks must be non-negative ints. But got: {self.ranks}"
+            )
+
         if self.flags is not None and self.options is not None:
             overlapping_names = sorted(set(self.flags).intersection(self.options))
             assert not overlapping_names, (
@@ -302,6 +321,17 @@ class NsightConfig:
         if not self.enabled or self.steps is None:
             return False
         return step_idx in self.steps
+
+    def profiles_rank(self, worker_rank: int) -> bool:
+        """Return whether the given worker rank should be wrapped with nsys.
+
+        ``ranks == None`` profiles every rank; otherwise only the listed ranks.
+        """
+        if not self.enabled:
+            return False
+        if self.ranks is None:
+            return True
+        return worker_rank in self.ranks
 
     def to_cli_tokens(self, default_output_prefix: Optional[str] = None) -> list[str]:
         """Render ``nsys profile`` options into CLI tokens."""

@@ -478,6 +478,7 @@ class Cluster:
         worker_name: str,
         nsight_cfg: Optional[NsightConfig],
         nsight_output_dir: Optional[str] = None,
+        worker_rank: Optional[int] = None,
     ) -> str:
         """Build the worker ``py_executable``, optionally wrapped with Nsight."""
         if nsight_cfg is None:
@@ -487,6 +488,12 @@ class Cluster:
 
         worker_group_name = WorkerAddress.from_name(worker_name).root_group_name
         if not nsight_cfg.profiles_worker_group(worker_group_name):
+            return python_interpreter_path
+        # Rank filter: wrapping every rank's workers with `nsys profile` makes Ray
+        # nsys-wrap its whole per-node worker pool, which on many-core hosts spawns
+        # hundreds of nsys processes and stalls Ray worker registration. Restrict
+        # profiling to `cluster.nsight.ranks` (e.g. [0, 1]) to keep it tractable.
+        if worker_rank is not None and not nsight_cfg.profiles_rank(worker_rank):
             return python_interpreter_path
 
         if nsight_output_dir is None:
@@ -572,6 +579,7 @@ class Cluster:
             if self._cluster_cfg is not None
             else None,
             nsight_output_dir=self._nsight_output_dir,
+            worker_rank=worker_rank,
         )
 
         options = {
