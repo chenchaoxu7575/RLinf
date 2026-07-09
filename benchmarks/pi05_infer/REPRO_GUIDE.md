@@ -39,14 +39,33 @@ observation at a time (locked decision).
 
 ## Environment
 
-- **Image:** `docker.io/chenchaoxnv/rlinf:0.2-maniskill_libero-blackwell`
-  (CUDA 12.8.1, torch 2.7.1+cu128, nsys 2025.3.1, flash-attn for
+- **Image (public):** `docker.io/chenchaox72877/rlinf:0.2-maniskill_libero-blackwell`
+  (~30 GB; CUDA 12.8.1, torch 2.7.1+cu128, nsys 2025.3.1, flash-attn for
   sm_90/100/120). The openpi environment ships in the image at
   `/opt/venv/openpi` — activate it before running:
   `source /opt/venv/openpi/bin/activate`. The patches in step 2 below are
   based on that openpi build (2026-07); if you use a different openpi
   install instead, diff before applying.
+- **enroot alternative:** the same environment is published as a squashfs
+  image on Hugging Face: `chenchaoxNV/sqsh` →
+  `rlinf0.2-maniskill_libero_blackwell.sqsh` (51.5 GB, `enroot create` it
+  directly).
 - **GPU:** anything sm_90+; see the cross-GPU caveat above.
+
+Verified container workflow (fresh 2× RTX PRO 5000 machine, driver 595):
+
+```bash
+docker pull chenchaox72877/rlinf:0.2-maniskill_libero-blackwell
+docker run -d --name pi05bench --gpus all --shm-size=16g \
+    -v <host_workdir>:/workspace/rlinf_pub \
+    chenchaox72877/rlinf:0.2-maniskill_libero-blackwell sleep infinity
+docker exec -it pi05bench bash
+# inside: source /opt/venv/openpi/bin/activate
+```
+
+`<host_workdir>` holds the repo checkout and the checkpoint, laid out as
+`/workspace/rlinf_pub/{RLinf,models/RLinf-Pi05-LIBERO-SFT}` inside the
+container so the script defaults work unchanged.
 
 ### 1. Repo
 
@@ -97,10 +116,17 @@ Defaults reproduce the baseline config exactly: `pi05_turtle`, bs=1,
 
 - **Warmup takes minutes** on the first run: max-autotune autotunes GEMMs
   and captures an inductor CUDA graph for the expert. Timed iterations only
-  start after warmup. Expect `cpu wall clock mean ≈ 58.9 ms` on the
-  reference box.
+  start after warmup.
+- **Expected numbers** (RTX PRO 5000): `cpu wall clock mean ≈ 52–55 ms`
+  standalone, +1–2 ms with nsys attached. The 58.9 ms table number was
+  measured inside the full RLinf worker with nsys attached; the structure
+  (per-phase GPU-projected times, bottleneck ranking) reproduces within
+  ~10 % on a fresh machine: vlm_forward 21.9 ms, vision_siglip 5.4 ms,
+  expert_forward 2.12 ms/step, e2e 52.1 ms.
 - `--phases` prints a sync-timed decomposition (obs/tokenize CPU work,
   VLM prefill, denoise loop, output transform) matching the NVTX taxonomy.
+  The GPU phases replay tensors captured from a real predict call — the
+  per-phase sum should land within ~2 ms of the e2e number.
 - `--no-compile` gives the eager baseline (useful to sanity-check kernels
   outside the inductor graph, but production is compiled).
 - `--iters/--warmup/--batch-size` for sweeps.
