@@ -26,6 +26,7 @@ and decorated methods consult it via :meth:`NsightProfiler.annotate`.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import inspect
 import logging
@@ -104,6 +105,28 @@ def stop_profile() -> None:
         return
     torch.cuda.profiler.stop()
     _profiling_active = False
+
+
+@contextlib.contextmanager
+def profile_range(
+    message: str,
+    color: Optional[str] = None,
+    domain: Optional[str] = None,
+):
+    """Emit an NVTX range for a code block while profiling is active.
+
+    The ``@NsightProfiler.annotate`` decorator equivalent for inline blocks
+    (e.g. the Isaac Sim step inside the env subprocess loop, where a decorator
+    cannot be applied). Emits nothing when :func:`is_profiling_active` is False.
+    """
+    if not _profiling_active:
+        yield
+        return
+    token = _range_push(message, color, domain)
+    try:
+        yield
+    finally:
+        _range_pop(token)
 
 
 class NsightProfiler:

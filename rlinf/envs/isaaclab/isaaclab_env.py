@@ -231,6 +231,16 @@ class IsaaclabBaseEnv(gym.Env):
     def close(self):
         self.env.close()
 
+    def start_profile(self, step_idx=None):
+        """Forward the nsys capture-window open to the Isaac Sim subprocess."""
+        if hasattr(self.env, "start_profile"):
+            self.env.start_profile(step_idx)
+
+    def stop_profile(self):
+        """Forward the nsys capture-window close to the Isaac Sim subprocess."""
+        if hasattr(self.env, "stop_profile"):
+            self.env.stop_profile()
+
     def update_reset_state_ids(self):
         """
         No muti task.

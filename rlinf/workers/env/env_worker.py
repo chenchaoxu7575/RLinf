@@ -70,6 +70,26 @@ class EnvWorker(Worker):
             // self.cfg.actor.model.num_action_chunks
         )
 
+    def start_profile(self, step_idx: int) -> None:
+        """Open the nsys window on this worker AND its Isaac Sim subprocesses.
+
+        The real env GPU/render work runs in the ``SubProcIsaacLabEnv`` child
+        process, which nsys only sees when ``trace-fork-before-exec`` is on and
+        the child toggles its own cudaProfilerApi capture -- so forward the
+        window to every env in addition to the parent-process gate.
+        """
+        super().start_profile(step_idx)
+        for env in list(self.env_list) + list(self.eval_env_list):
+            if hasattr(env, "start_profile"):
+                env.start_profile(step_idx)
+
+    def stop_profile(self) -> None:
+        """Close the nsys window on this worker AND its Isaac Sim subprocesses."""
+        super().stop_profile()
+        for env in list(self.env_list) + list(self.eval_env_list):
+            if hasattr(env, "stop_profile"):
+                env.stop_profile()
+
     def init_worker(self):
         self.dst_ranks = {
             "train": self._setup_dst_ranks(

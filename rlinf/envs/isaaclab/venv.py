@@ -17,6 +17,8 @@ from multiprocessing.connection import Connection
 import torch
 import torch.multiprocessing as mp
 
+from rlinf.utils import nsight_profiler
+
 from .utils import CloudpickleWrapper
 
 
@@ -41,17 +43,28 @@ def _torch_worker(
                 break
             if cmd == "reset":
                 reset_index, reset_seed = reset_idx_queue.get()
-                if reset_index is None:
-                    reset_result = isaac_env.reset(seed=reset_seed)
-                else:
-                    reset_result = isaac_env.reset(
-                        seed=reset_seed, env_ids=reset_index.to(device)
-                    )
+                with nsight_profiler.profile_range("sim/reset"):
+                    if reset_index is None:
+                        reset_result = isaac_env.reset(seed=reset_seed)
+                    else:
+                        reset_result = isaac_env.reset(
+                            seed=reset_seed, env_ids=reset_index.to(device)
+                        )
                 obs_queue.put(reset_result)
             elif cmd == "step":
                 input_action = action_queue.get()
-                step_result = isaac_env.step(input_action)
+                with nsight_profiler.profile_range("sim/step"):
+                    step_result = isaac_env.step(input_action)
                 obs_queue.put(step_result)
+            # Step-gated nsys profiling: the parent EnvWorker forwards these when
+            # the runner opens/closes a capture window, so this Isaac Sim
+            # subprocess (where the real GPU/render work happens) toggles its own
+            # torch.cuda.profiler start/stop and NVTX -- otherwise the child is
+            # invisible to nsys (parent-only cudaProfilerApi capture is empty).
+            elif cmd == "profile_start":
+                nsight_profiler.start_profile()
+            elif cmd == "profile_stop":
+                nsight_profiler.stop_profile()
             elif cmd == "close":
                 isaac_env.close()
                 child_remote.close()
@@ -116,3 +129,11 @@ class SubProcIsaacLabEnv:
     def device(self):
         self.parent_remote.send("device")
         return self.parent_remote.recv()
+
+    def start_profile(self, step_idx=None):
+        """Open the nsys capture window inside the Isaac Sim subprocess."""
+        self.parent_remote.send("profile_start")
+
+    def stop_profile(self):
+        """Close the nsys capture window inside the Isaac Sim subprocess."""
+        self.parent_remote.send("profile_stop")
