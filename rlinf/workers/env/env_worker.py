@@ -26,6 +26,7 @@ from rlinf.envs.wrappers import RecordVideo
 from rlinf.scheduler import Channel, Cluster, Worker
 from rlinf.utils.comm_mapping import CommMapper
 from rlinf.utils.placement import HybridComponentPlacement
+from rlinf.utils import nsight_profiler
 from rlinf.utils.nsight_profiler import NsightProfiler
 
 
@@ -74,18 +75,21 @@ class EnvWorker(Worker):
         """Open the nsys window on this worker AND its Isaac Sim subprocesses.
 
         The real env GPU/render work runs in the ``SubProcIsaacLabEnv`` child
-        process, which nsys only sees when ``trace-fork-before-exec`` is on and
-        the child toggles its own cudaProfilerApi capture -- so forward the
-        window to every env in addition to the parent-process gate.
+        process. Under ``capture-range=cudaProfilerApi`` nsys only honors the
+        *first* cudaProfilerStart/Stop pair in the (trace-fork-followed) process
+        tree, so this parent -- which does no CUDA of its own, only forwards to
+        the child -- must NOT call cudaProfilerStart (it would steal the slot
+        and leave the child's CUDA uncaptured). Toggle only the parent's NVTX
+        flag here and let each child drive the real cudaProfilerApi window.
         """
-        super().start_profile(step_idx)
+        nsight_profiler.start_profile(step_idx, drive_cuda_profiler=False)
         for env in list(self.env_list) + list(self.eval_env_list):
             if hasattr(env, "start_profile"):
                 env.start_profile(step_idx)
 
     def stop_profile(self) -> None:
         """Close the nsys window on this worker AND its Isaac Sim subprocesses."""
-        super().stop_profile()
+        nsight_profiler.stop_profile(drive_cuda_profiler=False)
         for env in list(self.env_list) + list(self.eval_env_list):
             if hasattr(env, "stop_profile"):
                 env.stop_profile()

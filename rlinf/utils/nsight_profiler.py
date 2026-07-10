@@ -81,29 +81,44 @@ def is_profiling_active() -> bool:
     return _profiling_active
 
 
-def start_profile(step_idx: Optional[int] = None) -> None:
+def start_profile(
+    step_idx: Optional[int] = None, drive_cuda_profiler: bool = True
+) -> None:
     """Open a profiling window for the current step.
 
     Calls ``torch.cuda.profiler.start()`` so nsys (running with
     ``capture-range=cudaProfilerApi``) begins writing data. The runner is
     expected to invoke this only when ``NsightConfig.should_profile_step``
     returns True for the current step.
+
+    ``drive_cuda_profiler=False`` toggles only the NVTX-active flag without
+    issuing ``cudaProfilerStart``. This is for a process that emits NVTX but
+    does no CUDA work of its own (e.g. the parent ``EnvWorker``, which forwards
+    all GPU work to an Isaac Sim subprocess): under
+    ``capture-range=cudaProfilerApi`` only the *first* cudaProfilerStart/Stop
+    pair in the process tree is honored, so a no-CUDA parent calling it would
+    steal that slot and leave the real CUDA process (the child) uncaptured.
     """
     global _profiling_active
     if _profiling_active:
         return
     _profiling_active = True
-    torch.cuda.profiler.start()
+    if drive_cuda_profiler:
+        torch.cuda.profiler.start()
     if step_idx is not None:
         logger.info("Nsight profiler window opened at step %d", step_idx)
 
 
-def stop_profile() -> None:
-    """Close the current profiling window."""
+def stop_profile(drive_cuda_profiler: bool = True) -> None:
+    """Close the current profiling window.
+
+    See :func:`start_profile` for ``drive_cuda_profiler``.
+    """
     global _profiling_active
     if not _profiling_active:
         return
-    torch.cuda.profiler.stop()
+    if drive_cuda_profiler:
+        torch.cuda.profiler.stop()
     _profiling_active = False
 
 
