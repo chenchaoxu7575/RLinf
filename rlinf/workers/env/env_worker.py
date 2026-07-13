@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from collections import defaultdict
 from typing import Any, Literal
 
@@ -74,27 +75,43 @@ class EnvWorker(Worker):
     def start_profile(self, step_idx: int) -> None:
         """Open the nsys window on this worker AND its Isaac Sim subprocesses.
 
-        The real env GPU/render work runs in the ``SubProcIsaacLabEnv`` child
-        process. Under ``capture-range=cudaProfilerApi`` nsys only honors the
-        *first* cudaProfilerStart/Stop pair in the (trace-fork-followed) process
-        tree, so this parent -- which does no CUDA of its own, only forwards to
-        the child -- must NOT call cudaProfilerStart (it would steal the slot
-        and leave the child's CUDA uncaptured). Toggle only the parent's NVTX
-        flag here and let each child drive the real cudaProfilerApi window.
+        The parent EnvWorker drives its OWN cudaProfilerStart so, when this group
+        is nsys-wrapped (``capture-range=cudaProfilerApi``), its report captures
+        the env-side timeline (e.g. the cross-process cudaIpc obs transfer). The
+        Isaac Sim child runs in a SEPARATE nsys session (session mode, gated by
+        ``nsys start``/``stop``, parent nsys has ``trace-fork-before-exec=false``),
+        so the two sessions are independent -- no more "first cudaProfilerStart in
+        the tree wins" conflict, hence the parent may drive its own here.
         """
-        nsight_profiler.start_profile(step_idx, drive_cuda_profiler=False)
+        nsight_profiler.start_profile(step_idx, drive_cuda_profiler=True)
         for env in list(self.env_list) + list(self.eval_env_list):
             if hasattr(env, "start_profile"):
                 env.start_profile(step_idx)
 
     def stop_profile(self) -> None:
         """Close the nsys window on this worker AND its Isaac Sim subprocesses."""
-        nsight_profiler.stop_profile(drive_cuda_profiler=False)
+        nsight_profiler.stop_profile(drive_cuda_profiler=True)
         for env in list(self.env_list) + list(self.eval_env_list):
             if hasattr(env, "stop_profile"):
                 env.stop_profile()
 
     def init_worker(self):
+        # Opt-in per-Isaac-subprocess nsys (Design B): only arm on the selected
+        # env ranks so we don't spawn one nsys per env worker across the whole
+        # node. venv.py reads _RLINF_ISAAC_NSYS_ON when spawning the Isaac child.
+        if os.environ.get("RLINF_ISAAC_NSYS", "0") == "1":
+            prof_ranks = {
+                int(r)
+                for r in os.environ.get("RLINF_ISAAC_NSYS_RANKS", "0,1").split(",")
+                if r.strip() != ""
+            }
+            if self._rank in prof_ranks:
+                os.environ["_RLINF_ISAAC_NSYS_ON"] = "1"
+                self.log_info(
+                    f"[isaac-nsys] rank {self._rank}: Isaac subprocess will run "
+                    f"under its own nsys → {os.environ.get('RLINF_ISAAC_NSYS_OUT', '/tmp')}"
+                )
+
         self.dst_ranks = {
             "train": self._setup_dst_ranks(
                 self.cfg.env.train.total_num_envs // self.stage_num
