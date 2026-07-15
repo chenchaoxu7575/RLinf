@@ -107,6 +107,10 @@ class EnvWorker(Worker):
             }
             if self._rank in prof_ranks:
                 os.environ["_RLINF_ISAAC_NSYS_ON"] = "1"
+                # Expose this env-worker rank so the spawned Isaac child (which
+                # inherits os.environ) can tag its nsys report filename with the
+                # originating rank -> rlinf_nsight_IsaacSim_rank{R}_step{N}_{pid}.
+                os.environ["_RLINF_ISAAC_NSYS_RANK"] = str(self._rank)
                 self.log_info(
                     f"[isaac-nsys] rank {self._rank}: Isaac subprocess will run "
                     f"under its own nsys → {os.environ.get('RLINF_ISAAC_NSYS_OUT', '/tmp')}"

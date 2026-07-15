@@ -75,7 +75,8 @@ def _maybe_wrap_isaac_spawn_with_nsys() -> None:
     # sim keeps running (--kill=none), sidestepping the shutdown-finalize gap.
     duration = os.environ.get("RLINF_ISAAC_NSYS_DURATION", "").strip()
     dur_flags = f" -d {int(duration)} --kill=none" if duration else ""
-    prefix = os.path.join(out_dir, "rlinf_nsight_IsaacSim_%p")
+    rank = os.environ.get("_RLINF_ISAAC_NSYS_RANK", "NA")
+    prefix = os.path.join(out_dir, f"rlinf_nsight_IsaacSim_rank{rank}_%p")
     wrapper = os.path.join(out_dir, "isaac_nsys_wrapper.sh")
     # Common prologue: scrub every nsys injection var inherited from a (possibly)
     # profiled parent so the child's own nsys starts clean and does not nest/error.
@@ -133,8 +134,12 @@ def _isaac_nsys_session_start(step_idx) -> None:
         return
     session = os.environ.get("RLINF_ISAAC_SESSION")
     out_dir = os.environ.get("RLINF_ISAAC_NSYS_OUT", "/tmp")
+    # Tag the report with the originating env-worker rank (set by
+    # EnvWorker.init_worker, inherited via os.environ) so multi-rank runs don't
+    # collide and each file says which rank it came from.
+    rank = os.environ.get("_RLINF_ISAAC_NSYS_RANK", "NA")
     out = os.path.join(
-        out_dir, f"rlinf_nsight_IsaacSim_step{step_idx}_{os.getpid()}"
+        out_dir, f"rlinf_nsight_IsaacSim_rank{rank}_step{step_idx}_{os.getpid()}"
     )
     r = subprocess.run(
         # NOTE: `nsys start` does NOT accept -t/--trace (that is set once on
